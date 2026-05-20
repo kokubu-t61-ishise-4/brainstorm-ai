@@ -357,6 +357,12 @@ if "tavily_count" not in st.session_state:
     st.session_state.tavily_count = 0
 if "tavily_month" not in st.session_state:
     st.session_state.tavily_month = datetime.now().month
+if "saved_chats" not in st.session_state:
+    st.session_state.saved_chats = []  # 保存された会話のリスト
+if "current_chat_name" not in st.session_state:
+    st.session_state.current_chat_name = None
+if "input_key" not in st.session_state:
+    st.session_state.input_key = 0  # 入力欄リセット用
 
 # API初期化
 client = init_groq()
@@ -435,9 +441,94 @@ with st.sidebar:
 
     st.markdown("---")
 
-    if st.button("🗑️ 会話をリセット", use_container_width=True):
-        st.session_state.chat_history = []
-        st.rerun()
+    # 会話の保存・管理
+    st.markdown("#### 💾 会話の保存")
+
+    # 現在の会話を保存
+    if st.session_state.chat_history:
+        save_name = st.text_input(
+            "保存名",
+            value=st.session_state.current_chat_name or "",
+            placeholder="例: 忘年会の店探し",
+            key="save_name_input"
+        )
+
+        if st.button("📥 この会話を保存", use_container_width=True):
+            if save_name:
+                # 同じ名前があれば上書き、なければ追加
+                existing_idx = None
+                for i, saved in enumerate(st.session_state.saved_chats):
+                    if saved["name"] == save_name:
+                        existing_idx = i
+                        break
+
+                chat_data = {
+                    "name": save_name,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "history": st.session_state.chat_history.copy()
+                }
+
+                if existing_idx is not None:
+                    st.session_state.saved_chats[existing_idx] = chat_data
+                    st.success(f"「{save_name}」を上書き保存しました")
+                else:
+                    st.session_state.saved_chats.append(chat_data)
+                    st.success(f"「{save_name}」を保存しました")
+
+                st.session_state.current_chat_name = save_name
+            else:
+                st.warning("保存名を入力してください")
+
+    # 保存済みの会話を読み込み
+    if st.session_state.saved_chats:
+        st.markdown("#### 📂 保存済みの会話")
+
+        for i, saved in enumerate(st.session_state.saved_chats):
+            col1, col2, col3 = st.columns([3, 1, 1])
+
+            with col1:
+                st.caption(f"**{saved['name']}**")
+                st.caption(f"{saved['timestamp']}")
+
+            with col2:
+                if st.button("📖", key=f"load_{i}", help="読み込む"):
+                    st.session_state.chat_history = saved["history"].copy()
+                    st.session_state.current_chat_name = saved["name"]
+                    st.session_state.input_key += 1
+                    st.rerun()
+
+            with col3:
+                if st.button("🗑️", key=f"delete_{i}", help="削除"):
+                    st.session_state.saved_chats.pop(i)
+                    st.rerun()
+
+    st.markdown("---")
+
+    # 新しいトピックを開始
+    if st.button("🆕 新しいトピックを開始", use_container_width=True, type="primary"):
+        # 現在の会話があれば保存を促す
+        if st.session_state.chat_history and not st.session_state.current_chat_name:
+            st.session_state.show_save_prompt = True
+        else:
+            st.session_state.chat_history = []
+            st.session_state.current_chat_name = None
+            st.session_state.input_key += 1
+            st.rerun()
+
+    if st.session_state.get("show_save_prompt"):
+        st.warning("現在の会話を保存しますか？")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("保存せず開始", use_container_width=True):
+                st.session_state.chat_history = []
+                st.session_state.current_chat_name = None
+                st.session_state.show_save_prompt = False
+                st.session_state.input_key += 1
+                st.rerun()
+        with col2:
+            if st.button("キャンセル", use_container_width=True):
+                st.session_state.show_save_prompt = False
+                st.rerun()
 
 # メインコンテンツ
 st.markdown('<p class="main-header">⚡ BrainSpark</p>', unsafe_allow_html=True)
@@ -509,13 +600,18 @@ if "quick_start" in st.session_state:
 
 # 入力欄
 st.markdown("---")
+
+# 現在のトピック名を表示
+if st.session_state.current_chat_name:
+    st.caption(f"📝 現在のトピック: **{st.session_state.current_chat_name}**")
+
 col1, col2 = st.columns([5, 1])
 
 with col1:
     user_input = st.text_input(
         "メッセージを入力",
         placeholder="質問や依頼を入力してください...",
-        key="user_input",
+        key=f"user_input_{st.session_state.input_key}",  # キーを動的に変更してリセット
         label_visibility="collapsed"
     )
 
@@ -542,6 +638,9 @@ if send_button and user_input:
         response_with_note = response
 
     st.session_state.chat_history.append({"role": "assistant", "content": response_with_note})
+
+    # 入力欄をクリア（キーを変更してリセット）
+    st.session_state.input_key += 1
     st.rerun()
 
 # 便利なアクションボタン（会話がある場合）
