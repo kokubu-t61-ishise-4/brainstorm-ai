@@ -134,39 +134,49 @@ def get_usage_display():
 
     # Groq
     groq_count = st.session_state.get("groq_count", 0)
-    groq_remaining = GROQ_LIMIT_PER_MINUTE - groq_count
     groq_reset_time = st.session_state.get("groq_reset_time", now)
 
+    # リセット時間を過ぎていたらカウンターをリセット
     if now > groq_reset_time:
-        groq_remaining = GROQ_LIMIT_PER_MINUTE
+        st.session_state.groq_count = 0
+        st.session_state.groq_reset_time = now + timedelta(minutes=1)
         groq_count = 0
+
+    groq_remaining = GROQ_LIMIT_PER_MINUTE - groq_count
 
     if groq_remaining > 20:
         groq_class = "usage-ok"
+        groq_status = "✅"
     elif groq_remaining > 5:
         groq_class = "usage-warning"
+        groq_status = "⚠️"
     else:
         groq_class = "usage-danger"
+        groq_status = "🚫"
 
     # リセットまでの秒数
-    if groq_remaining <= 0:
+    if groq_count >= GROQ_LIMIT_PER_MINUTE:
         seconds_until_reset = max(0, int((groq_reset_time - now).total_seconds()))
-        groq_text = f'<span class="{groq_class}">制限中（{seconds_until_reset}秒後リセット）</span>'
+        groq_text = f'{groq_status} <span class="{groq_class}">制限中（{seconds_until_reset}秒後リセット）</span>'
     else:
-        groq_text = f'<span class="{groq_class}">残り {groq_remaining}回/分</span>'
+        groq_text = f'{groq_status} <span class="{groq_class}">約{groq_remaining}回/分</span>'
 
     # Tavily
     tavily_count = st.session_state.get("tavily_count", 0)
     tavily_remaining = TAVILY_LIMIT_PER_MONTH - tavily_count
 
-    if tavily_remaining > 500:
+    if tavily_count >= TAVILY_LIMIT_PER_MONTH:
+        tavily_class = "usage-danger"
+        tavily_text = f'🚫 <span class="{tavily_class}">月間上限（来月リセット）</span>'
+    elif tavily_remaining > 500:
         tavily_class = "usage-ok"
+        tavily_text = f'✅ <span class="{tavily_class}">約{tavily_remaining}回/月</span>'
     elif tavily_remaining > 100:
         tavily_class = "usage-warning"
+        tavily_text = f'⚠️ <span class="{tavily_class}">約{tavily_remaining}回/月</span>'
     else:
         tavily_class = "usage-danger"
-
-    tavily_text = f'<span class="{tavily_class}">残り {tavily_remaining}回/月</span>'
+        tavily_text = f'⚠️ <span class="{tavily_class}">残りわずか（約{tavily_remaining}回/月）</span>'
 
     return groq_text, tavily_text
 
@@ -174,14 +184,6 @@ def get_usage_display():
 def call_llm(client, messages: list) -> str:
     """LLMを呼び出す（会話履歴対応）"""
     try:
-        # 使用回数チェック
-        groq_count = st.session_state.get("groq_count", 0)
-        if groq_count >= GROQ_LIMIT_PER_MINUTE:
-            reset_time = st.session_state.get("groq_reset_time", datetime.now())
-            if datetime.now() < reset_time:
-                seconds = int((reset_time - datetime.now()).total_seconds())
-                return f"⚠️ API制限に達しました。{seconds}秒後に再試行してください。"
-
         update_usage("groq")
 
         chat_completion = client.chat.completions.create(
@@ -192,17 +194,22 @@ def call_llm(client, messages: list) -> str:
         )
         return chat_completion.choices[0].message.content
     except Exception as e:
-        return f"エラーが発生しました: {e}"
+        error_str = str(e).lower()
+
+        # レート制限エラーの検出
+        if "rate_limit" in error_str or "rate limit" in error_str or "429" in error_str:
+            # カウンターをリセット時間まで最大値に設定
+            st.session_state.groq_count = GROQ_LIMIT_PER_MINUTE
+            st.session_state.groq_reset_time = datetime.now() + timedelta(minutes=1)
+            return "⚠️ **API制限に達しました**\n\n1分間に送信できるメッセージ数の上限に達しました。\n\n**約1分後に再試行してください。**\n\n（ページをリロードせずにお待ちください）"
+
+        # その他のエラー
+        return f"⚠️ エラーが発生しました: {e}"
 
 
 def web_search(tavily_client, query: str, max_results: int = 8) -> dict:
     """Tavilyでウェブ検索を実行"""
     try:
-        # 使用回数チェック
-        tavily_count = st.session_state.get("tavily_count", 0)
-        if tavily_count >= TAVILY_LIMIT_PER_MONTH:
-            return {"error": "今月のWeb検索上限に達しました。来月までお待ちください。"}
-
         update_usage("tavily")
 
         response = tavily_client.search(
@@ -214,7 +221,14 @@ def web_search(tavily_client, query: str, max_results: int = 8) -> dict:
         )
         return response
     except Exception as e:
-        return {"error": str(e)}
+        error_str = str(e).lower()
+
+        # レート制限または使用量超過エラーの検出
+        if "rate" in error_str or "limit" in error_str or "429" in error_str or "quota" in error_str:
+            st.session_state.tavily_count = TAVILY_LIMIT_PER_MONTH
+            return {"error": "⚠️ **Web検索の月間上限に達しました**\n\n来月1日にリセットされます。\n\nWeb検索なしでアイデア出しは引き続き利用できます。"}
+
+        return {"error": f"検索エラー: {e}"}
 
 
 def format_search_results(search_response: dict) -> str:
@@ -377,6 +391,8 @@ with st.sidebar:
 
     if not tavily_client:
         st.caption("⚠️ Web検索は無効")
+
+    st.caption("※ 目安の数値です。制限に達するとメッセージが表示されます。")
 
     st.markdown("---")
 
