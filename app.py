@@ -1017,11 +1017,12 @@ if skip_questions and st.session_state.asking_questions:
 
     st.session_state.chat_history.append({"role": "assistant", "content": response})
 
-    # 質問状態をリセット
-    st.session_state.asking_questions = False
-    st.session_state.pending_questions = []
-    st.session_state.collected_info = []
-    st.session_state.original_request = None
+    # エラーでなければ質問状態をリセット
+    if not response.startswith("⚠️"):
+        st.session_state.asking_questions = False
+        st.session_state.pending_questions = []
+        st.session_state.collected_info = []
+        st.session_state.original_request = None
     st.session_state.input_key += 1
     st.rerun()
 
@@ -1076,11 +1077,12 @@ if send_button and user_input:
                 if search_results:
                     response += "\n\n---\n*💡 Web検索結果を参考にしました*"
 
-                # 質問状態をリセット
-                st.session_state.asking_questions = False
-                st.session_state.pending_questions = []
-                st.session_state.collected_info = []
-                st.session_state.original_request = None
+                # エラーでなければ質問状態をリセット
+                if not response.startswith("⚠️"):
+                    st.session_state.asking_questions = False
+                    st.session_state.pending_questions = []
+                    st.session_state.collected_info = []
+                    st.session_state.original_request = None
 
             st.session_state.chat_history.append({"role": "assistant", "content": response})
 
