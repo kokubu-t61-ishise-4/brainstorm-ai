@@ -374,6 +374,102 @@ def analyze_if_clarification_needed(client, user_message: str, chat_history: lis
     return {"needs_clarification": False, "questions": []}
 
 
+def generate_training_topic(client, training_type: str) -> str:
+    """トレーニング用のお題を生成"""
+    prompts = {
+        "idea": """ビジネスシーンでのアイデア出しトレーニング用のお題を1つ生成してください。
+
+例：
+- 「会議の生産性を上げるアイデアを3つ出してください」
+- 「新入社員の定着率を上げる施策を考えてください」
+- 「社内コミュニケーションを活性化する方法を3つ挙げてください」
+
+お題のみを出力してください。説明や前置きは不要です。""",
+
+        "reply": """日常会話やビジネスシーンでの返答トレーニング用のお題を1つ生成してください。
+
+形式：「〇〇と言われました。どう返しますか？」
+
+例：
+- 「上司から『最近どう？』と聞かれました。どう返しますか？」
+- 「同僚から『この仕事、手伝ってもらえない？』と言われました。どう返しますか？」
+- 「会議で『〇〇さんはどう思う？』と急に振られました。どう返しますか？」
+
+お題のみを出力してください。説明や前置きは不要です。""",
+
+        "opinion": """意見を述べるトレーニング用のお題を1つ生成してください。
+
+形式：「〇〇についてあなたの意見を述べてください」
+
+例：
+- 「リモートワークと出社、どちらが良いと思いますか？理由も含めて述べてください」
+- 「AIの業務活用について、あなたの意見を述べてください」
+- 「週休3日制について、賛成・反対の立場を明確にして意見を述べてください」
+
+お題のみを出力してください。説明や前置きは不要です。""",
+
+        "question": """質問力を鍛えるトレーニング用のお題を1つ生成してください。
+
+形式：状況を説明し、「この場面で良い質問を3つ考えてください」
+
+例：
+- 「新しいプロジェクトの説明を受けました。理解を深めるための質問を3つ考えてください」
+- 「取引先が新サービスを紹介してくれました。興味を示す質問を3つ考えてください」
+- 「チームメンバーが困っている様子です。状況を把握するための質問を3つ考えてください」
+
+お題のみを出力してください。説明や前置きは不要です。""",
+
+        "summary": """要約力を鍛えるトレーニング用のお題を1つ生成してください。
+
+形式：100-150字程度の文章を提示し、「一言（20字以内）で要約してください」
+
+ビジネスや日常に関連した内容にしてください。
+
+お題のみを出力してください。説明や前置きは不要です。"""
+    }
+
+    try:
+        response = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompts.get(training_type, prompts["idea"])}],
+            model="llama-3.3-70b-versatile",
+            temperature=0.9,
+            max_tokens=256,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return "会議をもっと効率的にするアイデアを3つ出してください"
+
+
+def generate_training_feedback(client, training_type: str, topic: str, user_answer: str) -> str:
+    """トレーニングの回答にフィードバック"""
+    prompt = f"""ユーザーがトレーニングに取り組みました。建設的なフィードバックをしてください。
+
+【お題】
+{topic}
+
+【ユーザーの回答】
+{user_answer}
+
+【フィードバックのルール】
+1. まず良い点を具体的に褒める
+2. さらに良くするためのアドバイスを1-2点
+3. 別の視点からのアイデアを1-2個提案
+4. 励ましの言葉で締める
+
+簡潔に、温かみのあるトーンでお願いします。"""
+
+    try:
+        response = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.3-70b-versatile",
+            temperature=0.7,
+            max_tokens=512,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return "回答ありがとうございます！良い練習になりましたね。"
+
+
 def generate_clarification_response(questions: list) -> str:
     """質問を整形して返す"""
     response = "より良い回答をするために、いくつか教えてください：\n\n"
@@ -433,6 +529,10 @@ def process_message(client, tavily_client, user_message: str, chat_history: list
     return response, search_results
 
 
+# URLパラメータをチェック（トレーニングモード）
+query_params = st.query_params
+is_training_mode = query_params.get("mode") == "training"
+
 # セッション状態の初期化
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
@@ -450,6 +550,12 @@ if "current_chat_name" not in st.session_state:
     st.session_state.current_chat_name = None
 if "input_key" not in st.session_state:
     st.session_state.input_key = 0  # 入力欄リセット用
+if "training_active" not in st.session_state:
+    st.session_state.training_active = False
+if "training_topic" not in st.session_state:
+    st.session_state.training_topic = None
+if "training_type" not in st.session_state:
+    st.session_state.training_type = None
 
 # API初期化
 client = init_groq()
@@ -620,6 +726,91 @@ with st.sidebar:
 # メインコンテンツ
 st.markdown('<p class="main-header">⚡ BrainSpark</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-header">AIと会話しながらブレインストーミング。追加質問や深掘りも自由にできます</p>', unsafe_allow_html=True)
+
+# トレーニングモード（URLに?mode=trainingがある場合のみ表示）
+if is_training_mode:
+    st.markdown("---")
+
+    # トレーニングセクション
+    with st.expander("🎯 スキルトレーニング", expanded=not st.session_state.training_active):
+        st.markdown("""
+        **コミュニケーション力を鍛えましょう！**
+
+        以下から練習したいスキルを選んでください。AIがお題を出し、回答にフィードバックします。
+        """)
+
+        training_types = {
+            "idea": "💡 アイデア出し",
+            "reply": "💬 会話の返答",
+            "opinion": "🎤 意見を述べる",
+            "question": "❓ 質問力",
+            "summary": "📝 要約力"
+        }
+
+        cols = st.columns(len(training_types))
+        for i, (key, label) in enumerate(training_types.items()):
+            with cols[i]:
+                if st.button(label, key=f"train_{key}", use_container_width=True):
+                    st.session_state.training_type = key
+                    st.session_state.training_active = True
+                    with st.spinner("お題を生成中..."):
+                        update_usage("groq")
+                        st.session_state.training_topic = generate_training_topic(client, key)
+                    st.rerun()
+
+    # トレーニング実行中
+    if st.session_state.training_active and st.session_state.training_topic:
+        st.markdown("---")
+        st.markdown("### 📋 お題")
+        st.info(st.session_state.training_topic)
+
+        # 回答入力
+        with st.form(key="training_form", clear_on_submit=True):
+            training_answer = st.text_area(
+                "あなたの回答",
+                placeholder="考えて回答を入力してください...",
+                height=150
+            )
+
+            col1, col2, col3 = st.columns([2, 2, 1])
+            with col1:
+                submit_training = st.form_submit_button("📤 回答を送信", type="primary", use_container_width=True)
+            with col2:
+                skip_topic = st.form_submit_button("🔄 別のお題", use_container_width=True)
+            with col3:
+                end_training = st.form_submit_button("終了", use_container_width=True)
+
+        if submit_training and training_answer:
+            with st.spinner("フィードバックを生成中..."):
+                update_usage("groq")
+                feedback = generate_training_feedback(
+                    client,
+                    st.session_state.training_type,
+                    st.session_state.training_topic,
+                    training_answer
+                )
+
+            st.markdown("### 💬 フィードバック")
+            st.success(feedback)
+
+            # 次のお題へ進むボタン
+            if st.button("🔄 次のお題に挑戦", use_container_width=True):
+                with st.spinner("お題を生成中..."):
+                    update_usage("groq")
+                    st.session_state.training_topic = generate_training_topic(client, st.session_state.training_type)
+                st.rerun()
+
+        if skip_topic:
+            with st.spinner("お題を生成中..."):
+                update_usage("groq")
+                st.session_state.training_topic = generate_training_topic(client, st.session_state.training_type)
+            st.rerun()
+
+        if end_training:
+            st.session_state.training_active = False
+            st.session_state.training_topic = None
+            st.session_state.training_type = None
+            st.rerun()
 
 if not client:
     st.warning("Groq APIキーを設定してください（.streamlit/secrets.toml）")
