@@ -321,16 +321,17 @@ def get_system_prompt(framework: str) -> str:
     return base_prompt
 
 
-def analyze_if_clarification_needed(client, user_message: str, chat_history: list) -> dict:
+def analyze_if_clarification_needed(client, user_message: str, collected_info: list = None) -> dict:
     """ユーザーの入力を分析し、追加情報が必要か判断"""
 
-    # 会話が続いている場合（2回目以降のメッセージ）は分析をスキップ
-    if len(chat_history) >= 2:
-        return {"needs_clarification": False, "questions": []}
+    # 既に収集した情報を含めて分析
+    collected_text = ""
+    if collected_info:
+        collected_text = "\n\n【既に収集した情報】\n" + "\n".join([f"- {info}" for info in collected_info])
 
     analysis_prompt = f"""ユーザーからのリクエストを分析してください。
 
-リクエスト: {user_message}
+リクエスト: {user_message}{collected_text}
 
 このリクエストに対して「最高精度の回答」を出すために、追加で聞くべき情報があるか判断してください。
 
@@ -352,7 +353,7 @@ def analyze_if_clarification_needed(client, user_message: str, chat_history: lis
 }}
 
 質問が必要ない場合は questions を空配列 [] にしてください。
-質問は最大5個まで、具体的に。"""
+質問は最大5個まで、具体的に。既に収集した情報に含まれている内容は聞かないでください。"""
 
     try:
         response = client.chat.completions.create(
@@ -470,37 +471,27 @@ def generate_training_feedback(client, training_type: str, topic: str, user_answ
         return "回答ありがとうございます！良い練習になりましたね。"
 
 
-def generate_clarification_response(questions: list) -> str:
-    """質問を整形して返す"""
-    response = "より良い回答をするために、いくつか教えてください：\n\n"
-    for i, q in enumerate(questions, 1):
-        response += f"**{i}. {q}**\n"
-    response += "\nこれらを教えていただければ、より具体的で実用的な回答ができます！"
-    return response
+def generate_single_question(question: str, remaining_count: int) -> str:
+    """1つの質問を整形して返す"""
+    if remaining_count > 0:
+        return f"より良い回答のために教えてください：\n\n**{question}**\n\n（あと{remaining_count}問あります。「とりあえず回答」ボタンで今の情報で回答することもできます）"
+    else:
+        return f"最後の質問です：\n\n**{question}**\n\n（「とりあえず回答」ボタンで今の情報で回答することもできます）"
 
 
-def process_message(client, tavily_client, user_message: str, chat_history: list, framework: str) -> tuple:
-    """メッセージを処理し、必要に応じてWeb検索を実行"""
-
-    # まず、追加情報が必要か分析（最初のメッセージのみ）
-    update_usage("groq")  # 分析でもAPIを使用
-    analysis = analyze_if_clarification_needed(client, user_message, chat_history)
-
-    if analysis.get("needs_clarification") and analysis.get("questions"):
-        # 質問を返す
-        return generate_clarification_response(analysis["questions"]), None
+def process_message_with_search(client, tavily_client, original_request: str, collected_info: list, chat_history: list, framework: str) -> tuple:
+    """収集した情報を基に最終回答を生成"""
 
     # Web検索が必要か判断
     search_keywords = ["検索", "探して", "調べて", "会場", "店舗", "お店", "レストラン", "居酒屋",
                        "ホテル", "場所", "最新", "ニュース", "トレンド", "〜とは", "について教えて"]
 
-    needs_search = any(keyword in user_message for keyword in search_keywords)
+    needs_search = any(keyword in original_request for keyword in search_keywords)
     search_results = None
 
     if needs_search and tavily_client:
-        # 検索クエリを生成
-        search_query = user_message.replace("を探して", "").replace("を調べて", "").replace("を検索", "")
-        if "コース" not in search_query and any(k in user_message for k in ["会場", "店舗", "お店", "居酒屋", "レストラン"]):
+        search_query = original_request.replace("を探して", "").replace("を調べて", "").replace("を検索", "")
+        if "コース" not in search_query and any(k in original_request for k in ["会場", "店舗", "お店", "居酒屋", "レストラン"]):
             search_query += " コース 料金 飲み放題"
 
         with st.spinner("🔍 Web検索中..."):
@@ -515,18 +506,35 @@ def process_message(client, tavily_client, user_message: str, chat_history: list
     for msg in chat_history:
         messages.append({"role": msg["role"], "content": msg["content"]})
 
-    # 検索結果があれば追加
-    if search_results:
-        user_content = f"{user_message}\n\n【参考：Web検索結果】\n{search_results}"
+    # 収集した情報を含めたリクエスト
+    if collected_info:
+        info_text = "\n".join([f"- {info}" for info in collected_info])
+        user_content = f"{original_request}\n\n【追加情報】\n{info_text}"
     else:
-        user_content = user_message
+        user_content = original_request
+
+    if search_results:
+        user_content += f"\n\n【参考：Web検索結果】\n{search_results}"
 
     messages.append({"role": "user", "content": user_content})
 
-    # LLM呼び出し
     response = call_llm(client, messages)
 
     return response, search_results
+
+
+def start_clarification_process(client, user_message: str):
+    """質問プロセスを開始"""
+    update_usage("groq")
+    analysis = analyze_if_clarification_needed(client, user_message)
+
+    if analysis.get("needs_clarification") and analysis.get("questions"):
+        st.session_state.pending_questions = analysis["questions"]
+        st.session_state.collected_info = []
+        st.session_state.original_request = user_message
+        st.session_state.asking_questions = True
+        return True
+    return False
 
 
 # URLパラメータをチェック（トレーニングモード）
@@ -556,6 +564,14 @@ if "training_topic" not in st.session_state:
     st.session_state.training_topic = None
 if "training_type" not in st.session_state:
     st.session_state.training_type = None
+if "pending_questions" not in st.session_state:
+    st.session_state.pending_questions = []  # 残りの質問リスト
+if "collected_info" not in st.session_state:
+    st.session_state.collected_info = []  # 収集した情報
+if "original_request" not in st.session_state:
+    st.session_state.original_request = None  # 元のリクエスト
+if "asking_questions" not in st.session_state:
+    st.session_state.asking_questions = False  # 質問中フラグ
 
 # API初期化
 client = init_groq()
@@ -869,9 +885,16 @@ if "quick_start" in st.session_state:
     # ユーザーメッセージを追加
     st.session_state.chat_history.append({"role": "user", "content": quick_message})
 
-    # AIの応答を生成
-    with st.spinner("考え中..."):
-        response, _ = process_message(client, tavily_client, quick_message, st.session_state.chat_history[:-1], selected_framework)
+    # 質問プロセスを開始
+    with st.spinner("分析中..."):
+        if start_clarification_process(client, quick_message):
+            # 最初の質問を表示
+            first_question = st.session_state.pending_questions.pop(0)
+            remaining = len(st.session_state.pending_questions)
+            response = generate_single_question(first_question, remaining)
+        else:
+            # 質問不要なら直接回答
+            response, _ = process_message_with_search(client, tavily_client, quick_message, [], st.session_state.chat_history[:-1], selected_framework)
 
     st.session_state.chat_history.append({"role": "assistant", "content": response})
     st.rerun()
@@ -883,50 +906,110 @@ st.markdown("---")
 if st.session_state.current_chat_name:
     st.caption(f"📝 現在のトピック: **{st.session_state.current_chat_name}**")
 
-# 入力欄（text_areaで複数行入力可能）
-col1, col2 = st.columns([5, 1])
-
-with col1:
-    user_input = st.text_area(
+# フォームを使ってEnterキーで送信可能に
+with st.form(key=f"chat_form_{st.session_state.input_key}", clear_on_submit=True):
+    user_input = st.text_input(
         "メッセージを入力",
-        placeholder="質問や依頼を入力してください...",
-        label_visibility="collapsed",
-        height=80,
-        key=f"chat_input_{st.session_state.input_key}"
+        placeholder="質問や依頼を入力してください...（Enterで送信）",
+        label_visibility="collapsed"
     )
 
-with col2:
-    send_button = st.button("送信", type="primary", use_container_width=True)
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        send_button = st.form_submit_button("送信", type="primary", use_container_width=True)
+    with col2:
+        # 質問中の場合のみ「とりあえず回答」ボタンを表示
+        if st.session_state.asking_questions:
+            skip_questions = st.form_submit_button("とりあえず回答", use_container_width=True)
+        else:
+            skip_questions = False
 
-st.caption("💡 複数行入力可能です。Enterで改行、送信ボタンまたはCtrl+Enterで送信")
+# 「とりあえず回答」処理
+if skip_questions and st.session_state.asking_questions:
+    st.session_state.chat_history.append({"role": "user", "content": "（とりあえず今の情報で回答してください）"})
 
-# メッセージ送信処理
-if send_button and user_input:
-    # ユーザーメッセージを追加
-    st.session_state.chat_history.append({"role": "user", "content": user_input})
-
-    # AIの応答を生成
-    with st.spinner("考え中..."):
-        response, search_results = process_message(
-            client, tavily_client, user_input,
-            st.session_state.chat_history[:-1],  # 最新のユーザーメッセージは除く
+    with st.spinner("回答を生成中..."):
+        response, search_results = process_message_with_search(
+            client, tavily_client,
+            st.session_state.original_request,
+            st.session_state.collected_info,
+            st.session_state.chat_history[:-1],
             selected_framework
         )
 
-    # 検索結果があれば記録（オプション）
     if search_results:
-        response_with_note = response + "\n\n---\n*💡 Web検索結果を参考にしました*"
-    else:
-        response_with_note = response
+        response += "\n\n---\n*💡 Web検索結果を参考にしました*"
 
-    st.session_state.chat_history.append({"role": "assistant", "content": response_with_note})
+    st.session_state.chat_history.append({"role": "assistant", "content": response})
 
-    # 入力欄をクリア（キーを変更してリセット）
+    # 質問状態をリセット
+    st.session_state.asking_questions = False
+    st.session_state.pending_questions = []
+    st.session_state.collected_info = []
+    st.session_state.original_request = None
     st.session_state.input_key += 1
     st.rerun()
 
-# 便利なアクションボタン（会話がある場合）
-if st.session_state.chat_history:
+# メッセージ送信処理
+if send_button and user_input:
+    st.session_state.chat_history.append({"role": "user", "content": user_input})
+
+    # 質問中の場合
+    if st.session_state.asking_questions:
+        # 回答を収集
+        st.session_state.collected_info.append(user_input)
+
+        # 次の質問があるか確認
+        if st.session_state.pending_questions:
+            next_question = st.session_state.pending_questions.pop(0)
+            remaining = len(st.session_state.pending_questions)
+            response = generate_single_question(next_question, remaining)
+        else:
+            # 全ての質問に回答済み → 最終回答を生成
+            with st.spinner("回答を生成中..."):
+                response, search_results = process_message_with_search(
+                    client, tavily_client,
+                    st.session_state.original_request,
+                    st.session_state.collected_info,
+                    st.session_state.chat_history[:-1],
+                    selected_framework
+                )
+
+            if search_results:
+                response += "\n\n---\n*💡 Web検索結果を参考にしました*"
+
+            # 質問状態をリセット
+            st.session_state.asking_questions = False
+            st.session_state.pending_questions = []
+            st.session_state.collected_info = []
+            st.session_state.original_request = None
+
+        st.session_state.chat_history.append({"role": "assistant", "content": response})
+
+    else:
+        # 新しいリクエスト
+        with st.spinner("分析中..."):
+            if start_clarification_process(client, user_input):
+                # 最初の質問を表示
+                first_question = st.session_state.pending_questions.pop(0)
+                remaining = len(st.session_state.pending_questions)
+                response = generate_single_question(first_question, remaining)
+            else:
+                # 質問不要なら直接回答
+                response, search_results = process_message_with_search(
+                    client, tavily_client, user_input, [],
+                    st.session_state.chat_history[:-1], selected_framework
+                )
+                if search_results:
+                    response += "\n\n---\n*💡 Web検索結果を参考にしました*"
+
+        st.session_state.chat_history.append({"role": "assistant", "content": response})
+
+    st.session_state.input_key += 1
+    st.rerun()
+
+# 便利なアクションボタン（会話がある場合、質問中でない場合）
+if st.session_state.chat_history and not st.session_state.asking_questions:
     st.markdown("---")
     st.markdown("#### 💡 続けて質問")
 
@@ -937,7 +1020,7 @@ if st.session_state.chat_history:
             follow_up = "もう少し詳しく教えてください"
             st.session_state.chat_history.append({"role": "user", "content": follow_up})
             with st.spinner("考え中..."):
-                response, _ = process_message(client, tavily_client, follow_up, st.session_state.chat_history[:-1], selected_framework)
+                response, _ = process_message_with_search(client, tavily_client, follow_up, [], st.session_state.chat_history[:-1], selected_framework)
             st.session_state.chat_history.append({"role": "assistant", "content": response})
             st.rerun()
 
@@ -946,7 +1029,7 @@ if st.session_state.chat_history:
             follow_up = "他にも案を出してください"
             st.session_state.chat_history.append({"role": "user", "content": follow_up})
             with st.spinner("考え中..."):
-                response, _ = process_message(client, tavily_client, follow_up, st.session_state.chat_history[:-1], selected_framework)
+                response, _ = process_message_with_search(client, tavily_client, follow_up, [], st.session_state.chat_history[:-1], selected_framework)
             st.session_state.chat_history.append({"role": "assistant", "content": response})
             st.rerun()
 
@@ -955,7 +1038,7 @@ if st.session_state.chat_history:
             follow_up = "それぞれのメリットとデメリットを教えてください"
             st.session_state.chat_history.append({"role": "user", "content": follow_up})
             with st.spinner("考え中..."):
-                response, _ = process_message(client, tavily_client, follow_up, st.session_state.chat_history[:-1], selected_framework)
+                response, _ = process_message_with_search(client, tavily_client, follow_up, [], st.session_state.chat_history[:-1], selected_framework)
             st.session_state.chat_history.append({"role": "assistant", "content": response})
             st.rerun()
 
@@ -964,6 +1047,6 @@ if st.session_state.chat_history:
             follow_up = "具体的な実施手順を教えてください"
             st.session_state.chat_history.append({"role": "user", "content": follow_up})
             with st.spinner("考え中..."):
-                response, _ = process_message(client, tavily_client, follow_up, st.session_state.chat_history[:-1], selected_framework)
+                response, _ = process_message_with_search(client, tavily_client, follow_up, [], st.session_state.chat_history[:-1], selected_framework)
             st.session_state.chat_history.append({"role": "assistant", "content": response})
             st.rerun()
