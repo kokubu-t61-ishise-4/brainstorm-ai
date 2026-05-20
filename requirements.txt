@@ -1,3 +1,5 @@
 streamlit
 groq
 tavily-python
+pandas
+openpyxl

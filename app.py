@@ -3,6 +3,7 @@ import streamlit as st
 from groq import Groq
 from tavily import TavilyClient
 import json
+import pandas as pd
 from datetime import datetime, timedelta
 
 # ページ設定
@@ -909,21 +910,42 @@ if st.session_state.current_chat_name:
 
 # ファイルアップロード
 uploaded_file = st.file_uploader(
-    "📎 ファイルをアップロード（SQL, CSV, TXT, JSON, XML, MD, PY, JS など）",
-    type=["sql", "csv", "txt", "json", "xml", "md", "py", "js", "ts", "html", "css", "yaml", "yml", "log", "ini", "conf", "sh", "bat"],
-    help="テキストファイルをドラッグ＆ドロップまたは選択してください"
+    "📎 ファイルをアップロード（Excel, CSV, SQL, TXT, JSON など）",
+    type=["xlsx", "xls", "csv", "sql", "txt", "json", "xml", "md", "py", "js", "ts", "html", "css", "yaml", "yml", "log", "ini", "conf", "sh", "bat"],
+    help="ファイルをドラッグ＆ドロップまたは選択してください"
 )
 
 # アップロードされたファイルの内容を取得
 uploaded_content = None
 if uploaded_file is not None:
+    file_ext = uploaded_file.name.split(".")[-1].lower()
+
     try:
-        uploaded_content = uploaded_file.read().decode("utf-8")
-        with st.expander(f"📄 {uploaded_file.name} の内容（クリックで表示）"):
-            st.code(uploaded_content[:2000] + ("..." if len(uploaded_content) > 2000 else ""), language="text")
-        st.caption(f"✅ ファイル読み込み完了（{len(uploaded_content)}文字）。メッセージと一緒に送信されます。")
-    except UnicodeDecodeError:
-        st.error("このファイルは読み込めません（バイナリファイルの可能性があります）")
+        # Excel形式
+        if file_ext in ["xlsx", "xls"]:
+            df = pd.read_excel(uploaded_file)
+            uploaded_content = f"【データ形状】{df.shape[0]}行 × {df.shape[1]}列\n\n【列名】\n{', '.join(df.columns.tolist())}\n\n【データ（先頭20行）】\n{df.head(20).to_string()}"
+            with st.expander(f"📊 {uploaded_file.name} の内容（クリックで表示）"):
+                st.dataframe(df.head(50))
+            st.caption(f"✅ Excel読み込み完了（{df.shape[0]}行 × {df.shape[1]}列）。メッセージと一緒に送信されます。")
+
+        # CSV形式
+        elif file_ext == "csv":
+            df = pd.read_csv(uploaded_file)
+            uploaded_content = f"【データ形状】{df.shape[0]}行 × {df.shape[1]}列\n\n【列名】\n{', '.join(df.columns.tolist())}\n\n【データ（先頭20行）】\n{df.head(20).to_string()}"
+            with st.expander(f"📊 {uploaded_file.name} の内容（クリックで表示）"):
+                st.dataframe(df.head(50))
+            st.caption(f"✅ CSV読み込み完了（{df.shape[0]}行 × {df.shape[1]}列）。メッセージと一緒に送信されます。")
+
+        # テキスト形式
+        else:
+            uploaded_content = uploaded_file.read().decode("utf-8")
+            with st.expander(f"📄 {uploaded_file.name} の内容（クリックで表示）"):
+                st.code(uploaded_content[:2000] + ("..." if len(uploaded_content) > 2000 else ""), language="text")
+            st.caption(f"✅ ファイル読み込み完了（{len(uploaded_content)}文字）。メッセージと一緒に送信されます。")
+
+    except Exception as e:
+        st.error(f"ファイルの読み込みに失敗しました: {e}")
         uploaded_content = None
 
 # フォームを使ってEnterキーで送信可能に
