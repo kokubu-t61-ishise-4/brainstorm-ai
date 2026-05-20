@@ -538,6 +538,37 @@ def start_clarification_process(client, user_message: str):
     return False
 
 
+def is_user_asking_question(user_input: str) -> bool:
+    """ユーザーの入力が質問かどうか判定"""
+    question_patterns = ["？", "?", "どう", "何", "なぜ", "どのような", "例えば", "具体的に", "教えて", "わからない", "意味"]
+    return any(pattern in user_input for pattern in question_patterns)
+
+
+def answer_user_question_during_clarification(client, user_question: str, current_question: str) -> str:
+    """質問中にユーザーが質問してきた場合に回答"""
+    prompt = f"""ユーザーに質問をしたところ、ユーザーから逆に質問されました。
+ユーザーの質問に簡潔に答えてから、改めて元の質問をしてください。
+
+【あなたがした質問】
+{current_question}
+
+【ユーザーからの質問】
+{user_question}
+
+簡潔に回答してください。"""
+
+    try:
+        response = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.3-70b-versatile",
+            temperature=0.7,
+            max_tokens=512,
+        )
+        return response.choices[0].message.content
+    except:
+        return f"すみません、もう少し詳しく説明しますね。\n\n{current_question}"
+
+
 # URLパラメータをチェック（トレーニングモード）
 query_params = st.query_params
 is_training_mode = query_params.get("mode") == "training"
@@ -969,25 +1000,49 @@ with col2:
 # JavaScript: Enter で送信、Shift+Enter で改行
 st.components.v1.html("""
 <script>
-const doc = window.parent.document;
-const textareas = doc.querySelectorAll('textarea');
-textareas.forEach(textarea => {
-    if (!textarea.dataset.enterHandler) {
-        textarea.dataset.enterHandler = 'true';
-        textarea.addEventListener('keydown', function(e) {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                const buttons = doc.querySelectorAll('button[kind="primary"]');
-                for (let btn of buttons) {
-                    if (btn.innerText.includes('送信')) {
-                        btn.click();
-                        break;
+(function() {
+    const doc = window.parent.document;
+
+    function setupEnterHandler() {
+        const textareas = doc.querySelectorAll('textarea');
+        textareas.forEach(textarea => {
+            // 既にハンドラがある場合は一度削除して再設定
+            if (textarea._enterHandler) {
+                textarea.removeEventListener('keydown', textarea._enterHandler);
+            }
+
+            textarea._enterHandler = function(e) {
+                // Shift+Enter は改行（デフォルト動作を許可）
+                if (e.key === 'Enter' && e.shiftKey) {
+                    return; // 何もしない＝改行される
+                }
+                // Enter のみは送信
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const buttons = doc.querySelectorAll('button');
+                    for (let btn of buttons) {
+                        if (btn.innerText && btn.innerText.includes('送信')) {
+                            btn.click();
+                            break;
+                        }
                     }
                 }
-            }
+            };
+
+            textarea.addEventListener('keydown', textarea._enterHandler);
         });
     }
-});
+
+    // 初回実行
+    setupEnterHandler();
+
+    // DOMの変更を監視して再設定
+    const observer = new MutationObserver(function(mutations) {
+        setupEnterHandler();
+    });
+    observer.observe(doc.body, { childList: true, subtree: true });
+})();
 </script>
 """, height=0)
 
@@ -1031,35 +1086,50 @@ if send_button and user_input:
 
     # 質問中の場合
     if st.session_state.asking_questions:
-        # 回答を収集
-        st.session_state.collected_info.append(full_message)
+        # ユーザーが質問してきた場合（例：「例えばどのようなことですか？」）
+        if is_user_asking_question(user_input):
+            # 直前の質問を取得（履歴から）
+            last_ai_message = ""
+            for msg in reversed(st.session_state.chat_history[:-1]):
+                if msg["role"] == "assistant":
+                    last_ai_message = msg["content"]
+                    break
 
-        # 次の質問があるか確認
-        if st.session_state.pending_questions:
-            next_question = st.session_state.pending_questions.pop(0)
-            remaining = len(st.session_state.pending_questions)
-            response = generate_single_question(next_question, remaining)
+            with st.spinner("回答中..."):
+                update_usage("groq")
+                response = answer_user_question_during_clarification(client, user_input, last_ai_message)
+
+            st.session_state.chat_history.append({"role": "assistant", "content": response})
         else:
-            # 全ての質問に回答済み → 最終回答を生成
-            with st.spinner("回答を生成中..."):
-                response, search_results = process_message_with_search(
-                    client, tavily_client,
-                    st.session_state.original_request,
-                    st.session_state.collected_info,
-                    st.session_state.chat_history[:-1],
-                    selected_framework
-                )
+            # 通常の回答として収集
+            st.session_state.collected_info.append(full_message)
 
-            if search_results:
-                response += "\n\n---\n*💡 Web検索結果を参考にしました*"
+            # 次の質問があるか確認
+            if st.session_state.pending_questions:
+                next_question = st.session_state.pending_questions.pop(0)
+                remaining = len(st.session_state.pending_questions)
+                response = generate_single_question(next_question, remaining)
+            else:
+                # 全ての質問に回答済み → 最終回答を生成
+                with st.spinner("回答を生成中..."):
+                    response, search_results = process_message_with_search(
+                        client, tavily_client,
+                        st.session_state.original_request,
+                        st.session_state.collected_info,
+                        st.session_state.chat_history[:-1],
+                        selected_framework
+                    )
 
-            # 質問状態をリセット
-            st.session_state.asking_questions = False
-            st.session_state.pending_questions = []
-            st.session_state.collected_info = []
-            st.session_state.original_request = None
+                if search_results:
+                    response += "\n\n---\n*💡 Web検索結果を参考にしました*"
 
-        st.session_state.chat_history.append({"role": "assistant", "content": response})
+                # 質問状態をリセット
+                st.session_state.asking_questions = False
+                st.session_state.pending_questions = []
+                st.session_state.collected_info = []
+                st.session_state.original_request = None
+
+            st.session_state.chat_history.append({"role": "assistant", "content": response})
 
     else:
         # 新しいリクエスト
