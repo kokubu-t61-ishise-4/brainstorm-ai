@@ -321,8 +321,78 @@ def get_system_prompt(framework: str) -> str:
     return base_prompt
 
 
+def analyze_if_clarification_needed(client, user_message: str, chat_history: list) -> dict:
+    """ユーザーの入力を分析し、追加情報が必要か判断"""
+
+    # 会話が続いている場合（2回目以降のメッセージ）は分析をスキップ
+    if len(chat_history) >= 2:
+        return {"needs_clarification": False, "questions": []}
+
+    analysis_prompt = f"""ユーザーからのリクエストを分析してください。
+
+リクエスト: {user_message}
+
+このリクエストに対して「最高精度の回答」を出すために、追加で聞くべき情報があるか判断してください。
+
+## 判断基準
+- 曖昧で一般的な回答しかできない → 質問が必要
+- 具体的な回答ができる十分な情報がある → 質問不要
+- 単純な事実の質問 → 質問不要
+- 挨拶や雑談 → 質問不要
+
+## 出力形式（必ずこのJSON形式で）
+{{
+    "needs_clarification": true または false,
+    "reason": "判断理由を1文で",
+    "questions": [
+        "質問1",
+        "質問2",
+        "質問3"
+    ]
+}}
+
+質問が必要ない場合は questions を空配列 [] にしてください。
+質問は最大5個まで、具体的に。"""
+
+    try:
+        response = client.chat.completions.create(
+            messages=[{"role": "user", "content": analysis_prompt}],
+            model="llama-3.3-70b-versatile",
+            temperature=0.3,
+            max_tokens=512,
+        )
+        result = response.choices[0].message.content
+
+        # JSONを抽出
+        json_start = result.find("{")
+        json_end = result.rfind("}") + 1
+        if json_start != -1 and json_end > json_start:
+            return json.loads(result[json_start:json_end])
+    except:
+        pass
+
+    return {"needs_clarification": False, "questions": []}
+
+
+def generate_clarification_response(questions: list) -> str:
+    """質問を整形して返す"""
+    response = "より良い回答をするために、いくつか教えてください：\n\n"
+    for i, q in enumerate(questions, 1):
+        response += f"**{i}. {q}**\n"
+    response += "\nこれらを教えていただければ、より具体的で実用的な回答ができます！"
+    return response
+
+
 def process_message(client, tavily_client, user_message: str, chat_history: list, framework: str) -> tuple:
     """メッセージを処理し、必要に応じてWeb検索を実行"""
+
+    # まず、追加情報が必要か分析（最初のメッセージのみ）
+    update_usage("groq")  # 分析でもAPIを使用
+    analysis = analyze_if_clarification_needed(client, user_message, chat_history)
+
+    if analysis.get("needs_clarification") and analysis.get("questions"):
+        # 質問を返す
+        return generate_clarification_response(analysis["questions"]), None
 
     # Web検索が必要か判断
     search_keywords = ["検索", "探して", "調べて", "会場", "店舗", "お店", "レストラン", "居酒屋",
