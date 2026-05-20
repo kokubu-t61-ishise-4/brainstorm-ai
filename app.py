@@ -979,72 +979,22 @@ if uploaded_file is not None:
         st.error(f"ファイルの読み込みに失敗しました: {e}")
         uploaded_content = None
 
-# 入力欄（text_area + JavaScript でEnter送信、Shift+Enter改行）
-user_input = st.text_area(
-    "メッセージを入力",
-    placeholder="質問や依頼を入力してください...（Enterで送信、Shift+Enterで改行）",
-    label_visibility="collapsed",
-    height=80,
-    key=f"chat_input_{st.session_state.input_key}"
-)
+# 入力欄（フォームでEnter送信を確実に）
+with st.form(key=f"chat_form_{st.session_state.input_key}", clear_on_submit=True):
+    user_input = st.text_input(
+        "メッセージを入力",
+        placeholder="質問や依頼を入力してください...（Enterで送信）",
+        label_visibility="collapsed"
+    )
 
-col1, col2 = st.columns([4, 1])
-with col1:
-    send_button = st.button("送信", type="primary", use_container_width=True)
-with col2:
-    if st.session_state.asking_questions:
-        skip_questions = st.button("とりあえず回答", use_container_width=True)
-    else:
-        skip_questions = False
-
-# JavaScript: Enter で送信、Shift+Enter で改行
-st.components.v1.html("""
-<script>
-(function() {
-    const doc = window.parent.document;
-
-    function setupEnterHandler() {
-        const textareas = doc.querySelectorAll('textarea');
-        textareas.forEach(textarea => {
-            // 既にハンドラがある場合は一度削除して再設定
-            if (textarea._enterHandler) {
-                textarea.removeEventListener('keydown', textarea._enterHandler);
-            }
-
-            textarea._enterHandler = function(e) {
-                // Shift+Enter は改行（デフォルト動作を許可）
-                if (e.key === 'Enter' && e.shiftKey) {
-                    return; // 何もしない＝改行される
-                }
-                // Enter のみは送信
-                if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    const buttons = doc.querySelectorAll('button');
-                    for (let btn of buttons) {
-                        if (btn.innerText && btn.innerText.includes('送信')) {
-                            btn.click();
-                            break;
-                        }
-                    }
-                }
-            };
-
-            textarea.addEventListener('keydown', textarea._enterHandler);
-        });
-    }
-
-    // 初回実行
-    setupEnterHandler();
-
-    // DOMの変更を監視して再設定
-    const observer = new MutationObserver(function(mutations) {
-        setupEnterHandler();
-    });
-    observer.observe(doc.body, { childList: true, subtree: true });
-})();
-</script>
-""", height=0)
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        send_button = st.form_submit_button("送信", type="primary", use_container_width=True)
+    with col2:
+        if st.session_state.asking_questions:
+            skip_questions = st.form_submit_button("とりあえず回答", use_container_width=True)
+        else:
+            skip_questions = False
 
 # 「とりあえず回答」処理
 if skip_questions and st.session_state.asking_questions:
