@@ -948,23 +948,48 @@ if uploaded_file is not None:
         st.error(f"ファイルの読み込みに失敗しました: {e}")
         uploaded_content = None
 
-# フォームを使ってEnterキーで送信可能に
-with st.form(key=f"chat_form_{st.session_state.input_key}", clear_on_submit=True):
-    user_input = st.text_input(
-        "メッセージを入力",
-        placeholder="質問や依頼を入力してください...（Enterで送信）",
-        label_visibility="collapsed"
-    )
+# 入力欄（text_area + JavaScript でEnter送信、Shift+Enter改行）
+user_input = st.text_area(
+    "メッセージを入力",
+    placeholder="質問や依頼を入力してください...（Enterで送信、Shift+Enterで改行）",
+    label_visibility="collapsed",
+    height=80,
+    key=f"chat_input_{st.session_state.input_key}"
+)
 
-    col1, col2 = st.columns([4, 1])
-    with col1:
-        send_button = st.form_submit_button("送信", type="primary", use_container_width=True)
-    with col2:
-        # 質問中の場合のみ「とりあえず回答」ボタンを表示
-        if st.session_state.asking_questions:
-            skip_questions = st.form_submit_button("とりあえず回答", use_container_width=True)
-        else:
-            skip_questions = False
+col1, col2 = st.columns([4, 1])
+with col1:
+    send_button = st.button("送信", type="primary", use_container_width=True)
+with col2:
+    if st.session_state.asking_questions:
+        skip_questions = st.button("とりあえず回答", use_container_width=True)
+    else:
+        skip_questions = False
+
+# JavaScript: Enter で送信、Shift+Enter で改行
+st.components.v1.html("""
+<script>
+const doc = window.parent.document;
+const textareas = doc.querySelectorAll('textarea');
+textareas.forEach(textarea => {
+    if (!textarea.dataset.enterHandler) {
+        textarea.dataset.enterHandler = 'true';
+        textarea.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                const buttons = doc.querySelectorAll('button[kind="primary"]');
+                for (let btn of buttons) {
+                    if (btn.innerText.includes('送信')) {
+                        btn.click();
+                        break;
+                    }
+                }
+            }
+        });
+    }
+});
+</script>
+""", height=0)
 
 # 「とりあえず回答」処理
 if skip_questions and st.session_state.asking_questions:
