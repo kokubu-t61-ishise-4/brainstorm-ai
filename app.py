@@ -155,12 +155,16 @@ def call_llm(client, prompt: str) -> str:
         return f"エラーが発生しました: {e}"
 
 
-def web_search(tavily_client, query: str, max_results: int = 5) -> list:
+def web_search(tavily_client, query: str, max_results: int = 5, search_type: str = "info") -> list:
     """Tavilyでウェブ検索を実行"""
     try:
+        # 店舗検索の場合はより多くの結果を取得
+        if search_type == "venue":
+            max_results = 10
+
         response = tavily_client.search(
             query=query,
-            search_depth="basic",
+            search_depth="advanced" if search_type == "venue" else "basic",
             max_results=max_results,
             include_answer=True,
             include_raw_content=False,
@@ -168,6 +172,50 @@ def web_search(tavily_client, query: str, max_results: int = 5) -> list:
         return response
     except Exception as e:
         return {"error": str(e)}
+
+
+def build_venue_search_queries(theme: str, additional_info: dict) -> list:
+    """店舗検索用の詳細なクエリを生成"""
+    queries = []
+
+    # 基本クエリの構築
+    base_terms = []
+
+    # 追加情報からキーワードを抽出
+    location = ""
+    budget = ""
+    cuisine = ""
+    features = []
+
+    for key, value in additional_info.items():
+        if value:
+            key_lower = key.lower()
+            if "日時" in key or "時期" in key or "いつ" in key:
+                continue  # 日時は検索クエリには含めない
+            elif "ジャンル" in key or "料理" in key or "種類" in key:
+                cuisine = value
+            elif "条件" in key or "希望" in key or "必須" in key:
+                features.append(value)
+            elif "人数" in key:
+                base_terms.append(f"{value}人")
+            elif "予算" in key or "金額" in key:
+                budget = value
+
+    # メインクエリ
+    main_query = f"{theme} コース 料金 飲み放題"
+    if cuisine:
+        main_query = f"{theme} {cuisine} コース 料金"
+    queries.append(main_query)
+
+    # 詳細クエリ
+    if budget:
+        queries.append(f"{theme} {budget} コース内容 メニュー")
+
+    # 個室などの条件がある場合
+    for feature in features[:1]:  # 最大1つ
+        queries.append(f"{theme} {feature} 宴会 プラン")
+
+    return queries[:3]  # 最大3クエリ
 
 
 def analyze_intent(client, theme: str) -> dict:
@@ -181,6 +229,7 @@ def analyze_intent(client, theme: str) -> dict:
 以下のJSON形式で回答してください：
 {{
     "intent": "search" または "ideation" または "both",
+    "search_type": "venue" または "info" または "none",
     "needs_search": true または false,
     "search_queries": ["検索クエリ1", "検索クエリ2"],
     "reason": "判断理由",
@@ -198,8 +247,21 @@ def analyze_intent(client, theme: str) -> dict:
 - "both": 検索結果を元にアイデアを出す
   例: 「最新トレンドを踏まえた新商品企画」「競合調査をしてから差別化案を出して」
 
+search_type:
+- "venue": 店舗・会場・場所を探している（飲食店、イベント会場、ホテルなど）
+- "info": 情報・ニュース・トレンドを調べている
+- "none": 検索不要
+
+【重要】店舗・会場検索（search_type: "venue"）の場合は、必ず以下の質問を含めてください：
+- 希望の日時・時期
+- 料理のジャンルや会場の種類
+- 必須条件（個室、飲み放題、駅近、喫煙可など）
+- その他の希望
+
 search_queries: Web検索が必要な場合、効果的な検索クエリを1-3個生成
+  - 店舗検索の場合は「〇〇 コース 飲み放題 料金」のように詳細情報が取れるクエリにする
 needs_clarification: 情報が不足している場合はtrue
+  - 店舗・会場検索の場合は、基本的にtrue（詳細条件を聞く）
 clarification_questions: 追加で聞くべき質問（最大4つ、選択式）
 """
 
@@ -299,7 +361,7 @@ def generate_ideas_with_search(client, theme: str, framework: str, search_result
     return call_llm(client, prompt)
 
 
-def generate_search_response(client, theme: str, search_results: str, additional_info: dict = None) -> str:
+def generate_search_response(client, theme: str, search_results: str, additional_info: dict = None, search_type: str = "info") -> str:
     """検索結果を元に回答を生成（店舗検索など）"""
     context_text = ""
     if additional_info:
@@ -310,7 +372,51 @@ def generate_search_response(client, theme: str, search_results: str, additional
         if context_lines:
             context_text = "\n条件:\n" + "\n".join(context_lines)
 
-    prompt = f"""
+    # 店舗・会場検索の場合は専用のプロンプト
+    if search_type == "venue":
+        prompt = f"""
+あなたは店舗・会場探しの専門アシスタントです。
+ユーザーの条件に合う店舗・会場を、検索結果を元に詳しく紹介してください。
+
+リクエスト: {theme}
+{context_text}
+
+【Web検索結果】
+{search_results}
+
+以下の形式で、条件に合う店舗を3〜5件紹介してください：
+
+---
+## 🏠 [店舗名/会場名]
+
+**基本情報**
+- 📍 エリア/最寄り駅:
+- 💰 予算: 1人あたり〇〇円
+- 👥 収容人数: 〇〜〇名
+- 🚬 喫煙: 可/不可/分煙
+
+**コース情報**（わかる範囲で）
+- コース名: 〇〇コース
+- 料金: 〇〇円（税込/税抜）
+- 内容: 料理〇品＋飲み放題〇時間
+- 飲み放題の種類:
+
+**おすすめポイント**
+- （この店舗の特徴や強み）
+
+**予約・詳細**
+- URL: （検索結果のURLがあれば）
+- ⚠️ 空き状況は上記URLまたは店舗に直接ご確認ください
+
+---
+
+【注意事項】
+- 検索結果に情報がない項目は「要確認」と記載
+- 各店舗の後に「---」で区切る
+- 最後に「💡 ご予約の際は、直接お店に空き状況をご確認ください」と追記
+"""
+    else:
+        prompt = f"""
 あなたは親切なアシスタントです。
 ユーザーのリクエストに対して、検索結果を元に分かりやすく回答してください。
 
@@ -481,6 +587,8 @@ if "search_results" not in st.session_state:
     st.session_state.search_results = None
 if "search_response" not in st.session_state:
     st.session_state.search_response = None
+if "search_type" not in st.session_state:
+    st.session_state.search_type = "info"
 
 # API初期化
 client = init_groq()
@@ -593,6 +701,7 @@ with st.sidebar:
         st.session_state.intent_analysis = None
         st.session_state.search_results = None
         st.session_state.search_response = None
+        st.session_state.search_type = "info"
         st.rerun()
 
 # メインコンテンツ
@@ -631,6 +740,18 @@ if analyze_btn and theme:
         search_queries = analysis.get("search_queries", [])
         needs_clarification = analysis.get("needs_clarification", False)
         questions = analysis.get("clarification_questions", [])
+        search_type = analysis.get("search_type", "info")
+        st.session_state.search_type = search_type
+
+        # 店舗検索の場合、追加質問がなければデフォルトの質問を設定
+        if search_type == "venue" and not questions:
+            needs_clarification = True
+            questions = [
+                {"id": "datetime", "question": "希望の日時・時期は？", "options": ["今週末", "来週", "12月中", "1月", "日程未定"]},
+                {"id": "cuisine", "question": "料理のジャンル・会場の雰囲気は？", "options": ["和食", "イタリアン・洋食", "中華", "居酒屋", "ホテル宴会場", "こだわりなし"]},
+                {"id": "features", "question": "必須条件は？（複数ある場合は「その他」で入力）", "options": ["個室", "飲み放題付き", "駅近（徒歩5分以内）", "貸切可能", "特になし"]},
+                {"id": "other", "question": "その他の希望があれば教えてください", "options": []}
+            ]
 
         # 追加質問が必要な場合
         if needs_clarification and questions:
@@ -638,12 +759,17 @@ if analyze_btn and theme:
             st.session_state.waiting_for_answers = True
             st.rerun()
 
-        # Web検索が必要な場合
-        if needs_search and tavily_client and search_queries:
+        # Web検索が必要な場合（追加質問がない場合のみ実行）
+        if needs_search and tavily_client and search_queries and not needs_clarification:
             with st.spinner("🔍 Web検索中..."):
                 all_results = []
+
+                # 店舗検索の場合は詳細なクエリを使用
+                if search_type == "venue":
+                    search_queries = build_venue_search_queries(theme, st.session_state.additional_info)
+
                 for query in search_queries[:3]:
-                    result = web_search(tavily_client, query)
+                    result = web_search(tavily_client, query, search_type=search_type)
                     if "error" not in result:
                         all_results.append(result)
 
@@ -659,7 +785,7 @@ if analyze_btn and theme:
 
                     # 検索のみの場合
                     if intent == "search":
-                        response = generate_search_response(client, theme, st.session_state.search_results, st.session_state.additional_info)
+                        response = generate_search_response(client, theme, st.session_state.search_results, st.session_state.additional_info, search_type)
                         st.session_state.search_response = response
                         st.rerun()
 
@@ -737,12 +863,18 @@ if st.session_state.waiting_for_answers and st.session_state.clarification_quest
             analysis = st.session_state.intent_analysis
             intent = analysis.get("intent", "ideation") if analysis else "ideation"
             search_queries = analysis.get("search_queries", []) if analysis else []
+            search_type = st.session_state.search_type
 
-            if analysis and analysis.get("needs_search") and tavily_client and search_queries:
+            if analysis and analysis.get("needs_search") and tavily_client:
                 with st.spinner("🔍 Web検索中..."):
                     all_results = []
+
+                    # 店舗検索の場合は詳細なクエリを使用
+                    if search_type == "venue":
+                        search_queries = build_venue_search_queries(st.session_state.theme, answers)
+
                     for query in search_queries[:3]:
-                        result = web_search(tavily_client, query)
+                        result = web_search(tavily_client, query, search_type=search_type)
                         if "error" not in result:
                             all_results.append(result)
 
@@ -757,7 +889,7 @@ if st.session_state.waiting_for_answers and st.session_state.clarification_quest
                         st.session_state.search_results = format_search_results(combined_results)
 
                         if intent == "search":
-                            response = generate_search_response(client, st.session_state.theme, st.session_state.search_results, answers)
+                            response = generate_search_response(client, st.session_state.theme, st.session_state.search_results, answers, search_type)
                             st.session_state.search_response = response
                             st.rerun()
                         elif intent == "both":
@@ -797,12 +929,18 @@ if st.session_state.waiting_for_answers and st.session_state.clarification_quest
             analysis = st.session_state.intent_analysis
             intent = analysis.get("intent", "ideation") if analysis else "ideation"
             search_queries = analysis.get("search_queries", []) if analysis else []
+            search_type = st.session_state.search_type
 
-            if analysis and analysis.get("needs_search") and tavily_client and search_queries:
+            if analysis and analysis.get("needs_search") and tavily_client:
                 with st.spinner("🔍 Web検索中..."):
                     all_results = []
+
+                    # 店舗検索の場合でもスキップされた場合は基本クエリを使用
+                    if search_type == "venue" and not search_queries:
+                        search_queries = [f"{st.session_state.theme} コース 飲み放題 料金"]
+
                     for query in search_queries[:3]:
-                        result = web_search(tavily_client, query)
+                        result = web_search(tavily_client, query, search_type=search_type)
                         if "error" not in result:
                             all_results.append(result)
 
@@ -817,7 +955,7 @@ if st.session_state.waiting_for_answers and st.session_state.clarification_quest
                         st.session_state.search_results = format_search_results(combined_results)
 
                         if intent == "search":
-                            response = generate_search_response(client, st.session_state.theme, st.session_state.search_results, {})
+                            response = generate_search_response(client, st.session_state.theme, st.session_state.search_results, {}, search_type)
                             st.session_state.search_response = response
                             st.rerun()
                         elif intent == "both":
