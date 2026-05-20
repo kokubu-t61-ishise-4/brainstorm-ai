@@ -1,6 +1,7 @@
 """BrainSpark - AIブレインストーミングアシスタント"""
 import streamlit as st
 from groq import Groq
+from tavily import TavilyClient
 import json
 from datetime import datetime
 
@@ -42,6 +43,20 @@ st.markdown("""
         border-radius: 10px;
         border-left: 4px solid #17a2b8;
         margin: 1rem 0;
+    }
+    .search-box {
+        background: #fff3cd;
+        padding: 1rem;
+        border-radius: 10px;
+        border-left: 4px solid #ffc107;
+        margin: 1rem 0;
+    }
+    .search-result {
+        background: #f8f9fa;
+        padding: 0.8rem;
+        border-radius: 8px;
+        margin: 0.5rem 0;
+        border: 1px solid #dee2e6;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -110,7 +125,17 @@ def init_groq():
         client = Groq(api_key=st.secrets["GROQ_API_KEY"])
         return client
     except Exception as e:
-        st.error(f"APIキーの設定エラー: {e}")
+        st.error(f"Groq APIキーの設定エラー: {e}")
+        return None
+
+
+def init_tavily():
+    """Tavily APIの初期化"""
+    try:
+        client = TavilyClient(api_key=st.secrets["TAVILY_API_KEY"])
+        return client
+    except Exception as e:
+        st.warning(f"Tavily APIキーが設定されていません。Web検索機能は無効です。")
         return None
 
 
@@ -130,39 +155,52 @@ def call_llm(client, prompt: str) -> str:
         return f"エラーが発生しました: {e}"
 
 
-def analyze_theme_and_ask_questions(client, theme: str) -> dict:
-    """テーマを分析し、追加質問が必要か判断する"""
-    prompt = f"""
-あなたはアイデアソンのファシリテーターです。
-以下のテーマについて、最高精度のアイデアを出すために追加情報が必要かどうか判断してください。
+def web_search(tavily_client, query: str, max_results: int = 5) -> list:
+    """Tavilyでウェブ検索を実行"""
+    try:
+        response = tavily_client.search(
+            query=query,
+            search_depth="basic",
+            max_results=max_results,
+            include_answer=True,
+            include_raw_content=False,
+        )
+        return response
+    except Exception as e:
+        return {"error": str(e)}
 
-テーマ: {theme}
+
+def analyze_intent(client, theme: str) -> dict:
+    """ユーザーの入力を分析し、Web検索が必要か判断する"""
+    prompt = f"""
+あなたはAIアシスタントです。
+ユーザーの入力を分析し、どのように対応すべきか判断してください。
+
+ユーザーの入力: {theme}
 
 以下のJSON形式で回答してください：
 {{
+    "intent": "search" または "ideation" または "both",
+    "needs_search": true または false,
+    "search_queries": ["検索クエリ1", "検索クエリ2"],
+    "reason": "判断理由",
     "needs_clarification": true または false,
-    "questions": [
-        {{"id": "target", "question": "ターゲット層は誰ですか？", "options": ["10-20代", "30-40代", "50代以上", "全年齢"]}},
-        {{"id": "budget", "question": "予算規模は？", "options": ["〜10万円", "10-50万円", "50-100万円", "100万円以上", "未定"]}},
-        ...
-    ],
-    "reason": "追加質問が必要な理由（または不要な理由）"
+    "clarification_questions": [
+        {{"id": "q1", "question": "質問文", "options": ["選択肢1", "選択肢2", "選択肢3"]}}
+    ]
 }}
 
-追加質問のルール：
-- テーマが具体的で十分な情報がある場合は needs_clarification: false
-- 漠然としたテーマの場合は needs_clarification: true
-- 質問は最大4つまで
-- 各質問には3-5個の選択肢を用意
-- 選択肢の最後に「その他」は不要（自由入力欄は別途用意される）
+判断基準：
+- "search": 具体的な情報検索が必要（店舗検索、最新ニュース、価格調査、場所探しなど）
+  例: 「新宿で忘年会の会場を探して」「2026年のトレンドを調べて」
+- "ideation": アイデア出し・企画立案が目的
+  例: 「新商品のアイデアを出して」「イベントの企画を考えて」
+- "both": 検索結果を元にアイデアを出す
+  例: 「最新トレンドを踏まえた新商品企画」「競合調査をしてから差別化案を出して」
 
-よくある質問の例：
-- ターゲット層（年齢、職業、属性など）
-- 予算規模
-- 実施時期・期限
-- 制約条件（技術的、法的、リソースなど）
-- 目的・ゴール
-- 既存の取り組み・競合状況
+search_queries: Web検索が必要な場合、効果的な検索クエリを1-3個生成
+needs_clarification: 情報が不足している場合はtrue
+clarification_questions: 追加で聞くべき質問（最大4つ、選択式）
 """
 
     try:
@@ -173,14 +211,132 @@ def analyze_theme_and_ask_questions(client, theme: str) -> dict:
             return json.loads(response[json_start:json_end])
     except:
         pass
-    return {"needs_clarification": False, "questions": [], "reason": "分析できませんでした"}
+    return {
+        "intent": "ideation",
+        "needs_search": False,
+        "search_queries": [],
+        "reason": "分析できませんでした",
+        "needs_clarification": False,
+        "clarification_questions": []
+    }
+
+
+def format_search_results(search_response: dict) -> str:
+    """検索結果を整形する"""
+    if "error" in search_response:
+        return f"検索エラー: {search_response['error']}"
+
+    formatted = ""
+
+    # AI要約があれば追加
+    if search_response.get("answer"):
+        formatted += f"【要約】\n{search_response['answer']}\n\n"
+
+    # 個別結果
+    results = search_response.get("results", [])
+    if results:
+        formatted += "【検索結果】\n"
+        for i, result in enumerate(results, 1):
+            title = result.get("title", "タイトルなし")
+            content = result.get("content", "")[:200]
+            url = result.get("url", "")
+            formatted += f"{i}. {title}\n   {content}...\n   URL: {url}\n\n"
+
+    return formatted
+
+
+def generate_ideas_with_search(client, theme: str, framework: str, search_results: str, additional_info: dict = None) -> str:
+    """検索結果を踏まえてアイデアを生成"""
+    framework_info = FRAMEWORKS[framework]
+
+    context_text = ""
+    if additional_info:
+        context_lines = []
+        for key, value in additional_info.items():
+            if value:
+                context_lines.append(f"- {key}: {value}")
+        if context_lines:
+            context_text = "\n追加情報:\n" + "\n".join(context_lines)
+
+    if framework == "自由発想":
+        prompt = f"""
+あなたはアイデアソンのファシリテーターです。
+以下のテーマと検索結果に基づいて、創造的で実用的なアイデアを5個生成してください。
+
+テーマ: {theme}
+{context_text}
+
+【参考：Web検索結果】
+{search_results}
+
+各アイデアは以下の形式で出力してください：
+1. [アイデアのタイトル]: [具体的な説明（50-100字程度）]
+
+検索結果の情報を活用し、実現可能かつ斬新なアイデアを出してください。
+"""
+    else:
+        viewpoints = "\n".join([f"- {name}: {desc}" for name, desc in framework_info["prompts"]])
+        prompt = f"""
+あなたはアイデアソンのファシリテーターです。
+「{framework}」フレームワークを使って、以下のテーマについてアイデアを生成してください。
+
+テーマ: {theme}
+{context_text}
+
+【参考：Web検索結果】
+{search_results}
+
+フレームワークの視点:
+{viewpoints}
+
+各視点から1つずつアイデアを出してください。
+形式:
+【視点名】[アイデアのタイトル]: [具体的な説明（50-100字程度）]
+
+検索結果の情報を活用し、実現可能かつ創造的なアイデアを出してください。
+"""
+
+    return call_llm(client, prompt)
+
+
+def generate_search_response(client, theme: str, search_results: str, additional_info: dict = None) -> str:
+    """検索結果を元に回答を生成（店舗検索など）"""
+    context_text = ""
+    if additional_info:
+        context_lines = []
+        for key, value in additional_info.items():
+            if value:
+                context_lines.append(f"- {key}: {value}")
+        if context_lines:
+            context_text = "\n条件:\n" + "\n".join(context_lines)
+
+    prompt = f"""
+あなたは親切なアシスタントです。
+ユーザーのリクエストに対して、検索結果を元に分かりやすく回答してください。
+
+リクエスト: {theme}
+{context_text}
+
+【Web検索結果】
+{search_results}
+
+以下のルールで回答してください：
+1. 検索結果から relevant な情報を抽出・整理
+2. 条件に合うものをリストアップ
+3. それぞれの特徴やおすすめポイントを簡潔に説明
+4. 具体的な情報（価格、場所、URLなど）があれば含める
+5. 箇条書きで見やすく整理
+
+検索結果に十分な情報がない場合は、その旨を伝え、追加で調べるべきことを提案してください。
+"""
+
+    return call_llm(client, prompt)
 
 
 def generate_ideas_with_context(client, theme: str, framework: str, additional_info: dict, num_ideas: int = 5) -> str:
     """追加情報を含めてアイデアを生成"""
     framework_info = FRAMEWORKS[framework]
 
-    # 追加情報をテキスト化
     context_text = ""
     if additional_info:
         context_lines = []
@@ -319,9 +475,16 @@ if "waiting_for_answers" not in st.session_state:
     st.session_state.waiting_for_answers = False
 if "skip_questions" not in st.session_state:
     st.session_state.skip_questions = False
+if "intent_analysis" not in st.session_state:
+    st.session_state.intent_analysis = None
+if "search_results" not in st.session_state:
+    st.session_state.search_results = None
+if "search_response" not in st.session_state:
+    st.session_state.search_response = None
 
 # API初期化
 client = init_groq()
+tavily_client = init_tavily()
 
 # サイドバー
 with st.sidebar:
@@ -336,6 +499,15 @@ with st.sidebar:
         help="アイデア発想の切り口を選びます"
     )
     st.caption(FRAMEWORKS[selected_framework]["description"])
+
+    st.markdown("---")
+
+    # 機能説明
+    st.markdown("#### 🔍 自動判断機能")
+    st.caption("入力内容に応じて自動で判断します：")
+    st.caption("• 🌐 Web検索が必要 → 自動検索")
+    st.caption("• 💡 アイデア出し → フレームワーク適用")
+    st.caption("• 🔄 両方必要 → 検索→アイデア生成")
 
     st.markdown("---")
 
@@ -418,11 +590,14 @@ with st.sidebar:
         st.session_state.additional_info = {}
         st.session_state.waiting_for_answers = False
         st.session_state.skip_questions = False
+        st.session_state.intent_analysis = None
+        st.session_state.search_results = None
+        st.session_state.search_response = None
         st.rerun()
 
 # メインコンテンツ
 st.markdown('<p class="main-header">⚡ BrainSpark</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-header">AIと一緒にブレインストーミング。最高精度のアイデアを生み出すために、必要な情報をヒアリングします</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-header">AIと一緒にブレインストーミング。Web検索も自動で行い、最高精度のアイデアを生み出します</p>', unsafe_allow_html=True)
 
 if not client:
     st.warning("Groq APIキーを設定してください（.streamlit/secrets.toml）")
@@ -432,30 +607,79 @@ if not client:
 col1, col2 = st.columns([3, 1])
 with col1:
     theme = st.text_input(
-        "🎯 テーマを入力",
-        placeholder="例: 新しいお茶の商品企画、社内コミュニケーション改善、夏のイベント企画...",
+        "🎯 テーマ・質問を入力",
+        placeholder="例: 新商品のアイデア、新宿で忘年会の会場を探して、最新トレンドを踏まえた企画...",
         value=st.session_state.theme
     )
 with col2:
     st.markdown("<br>", unsafe_allow_html=True)
-    analyze_btn = st.button("✨ アイデアを生成", type="primary", use_container_width=True)
+    analyze_btn = st.button("✨ 実行", type="primary", use_container_width=True)
 
-# テーマ分析と追加質問
+# テーマ分析と処理
 if analyze_btn and theme:
     st.session_state.theme = theme
     st.session_state.skip_questions = False
+    st.session_state.search_results = None
+    st.session_state.search_response = None
 
-    with st.spinner("テーマを分析中..."):
-        analysis = analyze_theme_and_ask_questions(client, theme)
+    with st.spinner("入力を分析中..."):
+        analysis = analyze_intent(client, theme)
+        st.session_state.intent_analysis = analysis
 
-        if analysis.get("needs_clarification") and analysis.get("questions"):
-            st.session_state.clarification_questions = analysis
+        intent = analysis.get("intent", "ideation")
+        needs_search = analysis.get("needs_search", False)
+        search_queries = analysis.get("search_queries", [])
+        needs_clarification = analysis.get("needs_clarification", False)
+        questions = analysis.get("clarification_questions", [])
+
+        # 追加質問が必要な場合
+        if needs_clarification and questions:
+            st.session_state.clarification_questions = {"questions": questions, "reason": analysis.get("reason", "")}
             st.session_state.waiting_for_answers = True
-        else:
-            # 追加質問不要 → 直接アイデア生成
-            st.session_state.waiting_for_answers = False
-            st.session_state.clarification_questions = None
+            st.rerun()
 
+        # Web検索が必要な場合
+        if needs_search and tavily_client and search_queries:
+            with st.spinner("🔍 Web検索中..."):
+                all_results = []
+                for query in search_queries[:3]:
+                    result = web_search(tavily_client, query)
+                    if "error" not in result:
+                        all_results.append(result)
+
+                if all_results:
+                    combined_results = {
+                        "answer": all_results[0].get("answer", ""),
+                        "results": []
+                    }
+                    for r in all_results:
+                        combined_results["results"].extend(r.get("results", []))
+
+                    st.session_state.search_results = format_search_results(combined_results)
+
+                    # 検索のみの場合
+                    if intent == "search":
+                        response = generate_search_response(client, theme, st.session_state.search_results, st.session_state.additional_info)
+                        st.session_state.search_response = response
+                        st.rerun()
+
+                    # 検索＋アイデア出しの場合
+                    elif intent == "both":
+                        result = generate_ideas_with_search(client, theme, selected_framework, st.session_state.search_results, st.session_state.additional_info)
+
+                        lines = [line.strip() for line in result.split("\n") if line.strip()]
+                        new_ideas = []
+                        for line in lines:
+                            if any(c.isalnum() for c in line) and len(line) > 10:
+                                clean = line.lstrip("0123456789.-）)】・ ")
+                                if clean and clean not in st.session_state.ideas:
+                                    new_ideas.append(clean)
+
+                        st.session_state.ideas.extend(new_ideas[:10])
+                        st.rerun()
+
+        # アイデア出しのみの場合
+        if intent == "ideation" or (intent == "both" and not st.session_state.search_results):
             with st.spinner(f"「{selected_framework}」でアイデアを生成中..."):
                 result = generate_ideas_with_context(client, theme, selected_framework, st.session_state.additional_info)
 
@@ -468,7 +692,7 @@ if analyze_btn and theme:
                             new_ideas.append(clean)
 
                 st.session_state.ideas.extend(new_ideas[:10])
-    st.rerun()
+                st.rerun()
 
 # 追加質問の表示と回答収集
 if st.session_state.waiting_for_answers and st.session_state.clarification_questions:
@@ -476,7 +700,7 @@ if st.session_state.waiting_for_answers and st.session_state.clarification_quest
     reason = st.session_state.clarification_questions.get("reason", "")
 
     st.markdown('<div class="question-box">', unsafe_allow_html=True)
-    st.markdown("### 💬 より良いアイデアを出すために教えてください")
+    st.markdown("### 💬 より良い結果を出すために教えてください")
     if reason:
         st.caption(reason)
     st.markdown('</div>', unsafe_allow_html=True)
@@ -504,49 +728,166 @@ if st.session_state.waiting_for_answers and st.session_state.clarification_quest
 
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("📝 この情報でアイデアを生成", type="primary", use_container_width=True):
+        if st.button("📝 この情報で実行", type="primary", use_container_width=True):
             st.session_state.additional_info = answers
             st.session_state.waiting_for_answers = False
+            st.session_state.clarification_questions = None
 
-            with st.spinner(f"「{selected_framework}」でアイデアを生成中..."):
-                result = generate_ideas_with_context(client, st.session_state.theme, selected_framework, answers)
+            # 再度分析して実行
+            analysis = st.session_state.intent_analysis
+            intent = analysis.get("intent", "ideation") if analysis else "ideation"
+            search_queries = analysis.get("search_queries", []) if analysis else []
 
-                lines = [line.strip() for line in result.split("\n") if line.strip()]
-                new_ideas = []
-                for line in lines:
-                    if any(c.isalnum() for c in line) and len(line) > 10:
-                        clean = line.lstrip("0123456789.-）)】・ ")
-                        if clean and clean not in st.session_state.ideas:
-                            new_ideas.append(clean)
+            if analysis and analysis.get("needs_search") and tavily_client and search_queries:
+                with st.spinner("🔍 Web検索中..."):
+                    all_results = []
+                    for query in search_queries[:3]:
+                        result = web_search(tavily_client, query)
+                        if "error" not in result:
+                            all_results.append(result)
 
-                st.session_state.ideas.extend(new_ideas[:10])
-            st.rerun()
+                    if all_results:
+                        combined_results = {
+                            "answer": all_results[0].get("answer", ""),
+                            "results": []
+                        }
+                        for r in all_results:
+                            combined_results["results"].extend(r.get("results", []))
+
+                        st.session_state.search_results = format_search_results(combined_results)
+
+                        if intent == "search":
+                            response = generate_search_response(client, st.session_state.theme, st.session_state.search_results, answers)
+                            st.session_state.search_response = response
+                            st.rerun()
+                        elif intent == "both":
+                            result = generate_ideas_with_search(client, st.session_state.theme, selected_framework, st.session_state.search_results, answers)
+
+                            lines = [line.strip() for line in result.split("\n") if line.strip()]
+                            new_ideas = []
+                            for line in lines:
+                                if any(c.isalnum() for c in line) and len(line) > 10:
+                                    clean = line.lstrip("0123456789.-）)】・ ")
+                                    if clean and clean not in st.session_state.ideas:
+                                        new_ideas.append(clean)
+
+                            st.session_state.ideas.extend(new_ideas[:10])
+                            st.rerun()
+            else:
+                with st.spinner(f"「{selected_framework}」でアイデアを生成中..."):
+                    result = generate_ideas_with_context(client, st.session_state.theme, selected_framework, answers)
+
+                    lines = [line.strip() for line in result.split("\n") if line.strip()]
+                    new_ideas = []
+                    for line in lines:
+                        if any(c.isalnum() for c in line) and len(line) > 10:
+                            clean = line.lstrip("0123456789.-）)】・ ")
+                            if clean and clean not in st.session_state.ideas:
+                                new_ideas.append(clean)
+
+                    st.session_state.ideas.extend(new_ideas[:10])
+                st.rerun()
 
     with col2:
-        if st.button("⏭️ スキップして生成", use_container_width=True):
+        if st.button("⏭️ スキップして実行", use_container_width=True):
             st.session_state.waiting_for_answers = False
             st.session_state.skip_questions = True
+            st.session_state.clarification_questions = None
 
-            with st.spinner(f"「{selected_framework}」でアイデアを生成中..."):
-                result = generate_ideas_with_context(client, st.session_state.theme, selected_framework, {})
+            analysis = st.session_state.intent_analysis
+            intent = analysis.get("intent", "ideation") if analysis else "ideation"
+            search_queries = analysis.get("search_queries", []) if analysis else []
 
-                lines = [line.strip() for line in result.split("\n") if line.strip()]
-                new_ideas = []
-                for line in lines:
-                    if any(c.isalnum() for c in line) and len(line) > 10:
-                        clean = line.lstrip("0123456789.-）)】・ ")
-                        if clean and clean not in st.session_state.ideas:
-                            new_ideas.append(clean)
+            if analysis and analysis.get("needs_search") and tavily_client and search_queries:
+                with st.spinner("🔍 Web検索中..."):
+                    all_results = []
+                    for query in search_queries[:3]:
+                        result = web_search(tavily_client, query)
+                        if "error" not in result:
+                            all_results.append(result)
 
-                st.session_state.ideas.extend(new_ideas[:10])
-            st.rerun()
+                    if all_results:
+                        combined_results = {
+                            "answer": all_results[0].get("answer", ""),
+                            "results": []
+                        }
+                        for r in all_results:
+                            combined_results["results"].extend(r.get("results", []))
 
-# タブ表示
+                        st.session_state.search_results = format_search_results(combined_results)
+
+                        if intent == "search":
+                            response = generate_search_response(client, st.session_state.theme, st.session_state.search_results, {})
+                            st.session_state.search_response = response
+                            st.rerun()
+                        elif intent == "both":
+                            result = generate_ideas_with_search(client, st.session_state.theme, selected_framework, st.session_state.search_results, {})
+
+                            lines = [line.strip() for line in result.split("\n") if line.strip()]
+                            new_ideas = []
+                            for line in lines:
+                                if any(c.isalnum() for c in line) and len(line) > 10:
+                                    clean = line.lstrip("0123456789.-）)】・ ")
+                                    if clean and clean not in st.session_state.ideas:
+                                        new_ideas.append(clean)
+
+                            st.session_state.ideas.extend(new_ideas[:10])
+                            st.rerun()
+            else:
+                with st.spinner(f"「{selected_framework}」でアイデアを生成中..."):
+                    result = generate_ideas_with_context(client, st.session_state.theme, selected_framework, {})
+
+                    lines = [line.strip() for line in result.split("\n") if line.strip()]
+                    new_ideas = []
+                    for line in lines:
+                        if any(c.isalnum() for c in line) and len(line) > 10:
+                            clean = line.lstrip("0123456789.-）)】・ ")
+                            if clean and clean not in st.session_state.ideas:
+                                new_ideas.append(clean)
+
+                    st.session_state.ideas.extend(new_ideas[:10])
+                st.rerun()
+
+# 検索結果の表示（検索のみの場合）
+if st.session_state.search_response and not st.session_state.waiting_for_answers:
+    st.markdown("### 🔍 検索結果")
+
+    st.markdown(st.session_state.search_response)
+
+    if st.session_state.search_results:
+        with st.expander("📄 元の検索データを見る"):
+            st.text(st.session_state.search_results)
+
+    st.markdown("---")
+
+    # 検索結果からアイデア出しに移行するオプション
+    if st.button("💡 この情報を元にアイデアを出す", type="secondary"):
+        with st.spinner(f"「{selected_framework}」でアイデアを生成中..."):
+            result = generate_ideas_with_search(client, st.session_state.theme, selected_framework, st.session_state.search_results, st.session_state.additional_info)
+
+            lines = [line.strip() for line in result.split("\n") if line.strip()]
+            new_ideas = []
+            for line in lines:
+                if any(c.isalnum() for c in line) and len(line) > 10:
+                    clean = line.lstrip("0123456789.-）)】・ ")
+                    if clean and clean not in st.session_state.ideas:
+                        new_ideas.append(clean)
+
+            st.session_state.ideas.extend(new_ideas[:10])
+            st.session_state.search_response = None  # 検索結果表示をクリア
+        st.rerun()
+
+# タブ表示（アイデアがある場合）
 if st.session_state.ideas and not st.session_state.waiting_for_answers:
     tab1, tab2, tab3 = st.tabs(["📝 アイデア一覧", "⭐ 評価", "🔀 組み合わせ"])
 
     with tab1:
         st.markdown("### 生成されたアイデア")
+
+        # 検索結果があれば表示
+        if st.session_state.search_results:
+            with st.expander("🔍 参考にしたWeb検索結果"):
+                st.text(st.session_state.search_results)
 
         for i, idea in enumerate(st.session_state.ideas):
             with st.container():
@@ -694,7 +1035,7 @@ if st.session_state.ideas and not st.session_state.waiting_for_answers:
         else:
             st.info("組み合わせるには2つ以上のアイデアが必要です")
 
-elif not st.session_state.waiting_for_answers:
+elif not st.session_state.waiting_for_answers and not st.session_state.search_response:
     # 初期表示
     st.markdown("---")
     st.markdown("### 🚀 使い方")
@@ -702,16 +1043,26 @@ elif not st.session_state.waiting_for_answers:
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.markdown("#### 1. テーマを入力")
-        st.markdown("ブレインストーミングしたいテーマを入力します")
+        st.markdown("#### 1. 入力")
+        st.markdown("テーマや質問を自由に入力")
+        st.caption("例：")
+        st.caption("• 新商品のアイデア")
+        st.caption("• 新宿で忘年会の会場を探して")
+        st.caption("• 最新トレンドを踏まえた企画")
 
     with col2:
-        st.markdown("#### 2. 質問に回答")
-        st.markdown("AIが追加情報を聞いてくるので、回答すると精度UP")
+        st.markdown("#### 2. 自動判断")
+        st.markdown("AIが最適な方法を自動選択")
+        st.caption("• 🔍 Web検索が必要 → 自動検索")
+        st.caption("• 💡 アイデア出し → フレームワーク適用")
+        st.caption("• 🔄 両方 → 検索→生成")
 
     with col3:
-        st.markdown("#### 3. アイデアを評価")
-        st.markdown("AIまたは手動で評価し、優先順位をつけます")
+        st.markdown("#### 3. 結果")
+        st.markdown("検索結果やアイデアを表示")
+        st.caption("• 検索結果の整理・要約")
+        st.caption("• アイデアの評価・深掘り")
+        st.caption("• エクスポート機能")
 
     st.markdown("---")
     st.markdown("### 📚 フレームワーク一覧")
