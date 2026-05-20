@@ -845,6 +845,7 @@ with chat_container:
 - 💡 **アイデア出し**: 「新商品のアイデアを出して」「プレゼンの構成を考えて」
 - 🔍 **検索**: 「新宿で忘年会の会場を探して」「2026年のトレンドを調べて」
 - 🤔 **相談**: 「この企画のメリット・デメリットを教えて」
+- 📎 **ファイル分析**: SQLやCSVをアップロードして「このクエリを説明して」「データを分析して」
 
 **情報が足りなければ質問します。回答に対して追加で質問することもできます。**
         """)
@@ -906,6 +907,25 @@ st.markdown("---")
 if st.session_state.current_chat_name:
     st.caption(f"📝 現在のトピック: **{st.session_state.current_chat_name}**")
 
+# ファイルアップロード
+uploaded_file = st.file_uploader(
+    "📎 ファイルをアップロード（SQL, CSV, TXT, JSON, XML, MD, PY, JS など）",
+    type=["sql", "csv", "txt", "json", "xml", "md", "py", "js", "ts", "html", "css", "yaml", "yml", "log", "ini", "conf", "sh", "bat"],
+    help="テキストファイルをドラッグ＆ドロップまたは選択してください"
+)
+
+# アップロードされたファイルの内容を取得
+uploaded_content = None
+if uploaded_file is not None:
+    try:
+        uploaded_content = uploaded_file.read().decode("utf-8")
+        with st.expander(f"📄 {uploaded_file.name} の内容（クリックで表示）"):
+            st.code(uploaded_content[:2000] + ("..." if len(uploaded_content) > 2000 else ""), language="text")
+        st.caption(f"✅ ファイル読み込み完了（{len(uploaded_content)}文字）。メッセージと一緒に送信されます。")
+    except UnicodeDecodeError:
+        st.error("このファイルは読み込めません（バイナリファイルの可能性があります）")
+        uploaded_content = None
+
 # フォームを使ってEnterキーで送信可能に
 with st.form(key=f"chat_form_{st.session_state.input_key}", clear_on_submit=True):
     user_input = st.text_input(
@@ -952,12 +972,20 @@ if skip_questions and st.session_state.asking_questions:
 
 # メッセージ送信処理
 if send_button and user_input:
-    st.session_state.chat_history.append({"role": "user", "content": user_input})
+    # ファイルが添付されている場合、メッセージに含める
+    full_message = user_input
+    if uploaded_content:
+        file_name = uploaded_file.name if uploaded_file else "file"
+        full_message = f"{user_input}\n\n【添付ファイル: {file_name}】\n```\n{uploaded_content[:8000]}\n```"
+        if len(uploaded_content) > 8000:
+            full_message += "\n（ファイルが長いため最初の8000文字のみ表示）"
+
+    st.session_state.chat_history.append({"role": "user", "content": full_message})
 
     # 質問中の場合
     if st.session_state.asking_questions:
         # 回答を収集
-        st.session_state.collected_info.append(user_input)
+        st.session_state.collected_info.append(full_message)
 
         # 次の質問があるか確認
         if st.session_state.pending_questions:
@@ -989,7 +1017,7 @@ if send_button and user_input:
     else:
         # 新しいリクエスト
         with st.spinner("分析中..."):
-            if start_clarification_process(client, user_input):
+            if start_clarification_process(client, full_message):
                 # 最初の質問を表示
                 first_question = st.session_state.pending_questions.pop(0)
                 remaining = len(st.session_state.pending_questions)
@@ -997,7 +1025,7 @@ if send_button and user_input:
             else:
                 # 質問不要なら直接回答
                 response, search_results = process_message_with_search(
-                    client, tavily_client, user_input, [],
+                    client, tavily_client, full_message, [],
                     st.session_state.chat_history[:-1], selected_framework
                 )
                 if search_results:
