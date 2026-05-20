@@ -605,18 +605,19 @@ st.markdown("---")
 if st.session_state.current_chat_name:
     st.caption(f"📝 現在のトピック: **{st.session_state.current_chat_name}**")
 
-col1, col2 = st.columns([5, 1])
+# フォームを使ってEnterキーで送信可能に
+with st.form(key=f"chat_form_{st.session_state.input_key}", clear_on_submit=True):
+    col1, col2 = st.columns([5, 1])
 
-with col1:
-    user_input = st.text_input(
-        "メッセージを入力",
-        placeholder="質問や依頼を入力してください...",
-        key=f"user_input_{st.session_state.input_key}",  # キーを動的に変更してリセット
-        label_visibility="collapsed"
-    )
+    with col1:
+        user_input = st.text_input(
+            "メッセージを入力",
+            placeholder="質問や依頼を入力してください...（Enterで送信）",
+            label_visibility="collapsed"
+        )
 
-with col2:
-    send_button = st.button("送信", type="primary", use_container_width=True)
+    with col2:
+        send_button = st.form_submit_button("送信", type="primary", use_container_width=True)
 
 # メッセージ送信処理
 if send_button and user_input:
