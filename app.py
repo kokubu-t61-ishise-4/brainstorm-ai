@@ -1,4 +1,4 @@
-"""アイデアソン・アシスタント - ブレインストーミングAIエージェント"""
+"""BrainSpark - AIブレインストーミングアシスタント"""
 import streamlit as st
 from groq import Groq
 import json
@@ -6,8 +6,8 @@ from datetime import datetime
 
 # ページ設定
 st.set_page_config(
-    page_title="アイデアソン・アシスタント",
-    page_icon="💡",
+    page_title="BrainSpark",
+    page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -36,6 +36,13 @@ st.markdown("""
     .score-high { color: #28a745; font-weight: bold; }
     .score-mid { color: #ffc107; font-weight: bold; }
     .score-low { color: #dc3545; font-weight: bold; }
+    .question-box {
+        background: #e8f4f8;
+        padding: 1rem;
+        border-radius: 10px;
+        border-left: 4px solid #17a2b8;
+        margin: 1rem 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -123,21 +130,78 @@ def call_llm(client, prompt: str) -> str:
         return f"エラーが発生しました: {e}"
 
 
-def generate_ideas(client, theme: str, framework: str, num_ideas: int = 5) -> str:
-    """アイデアを生成"""
+def analyze_theme_and_ask_questions(client, theme: str) -> dict:
+    """テーマを分析し、追加質問が必要か判断する"""
+    prompt = f"""
+あなたはアイデアソンのファシリテーターです。
+以下のテーマについて、最高精度のアイデアを出すために追加情報が必要かどうか判断してください。
+
+テーマ: {theme}
+
+以下のJSON形式で回答してください：
+{{
+    "needs_clarification": true または false,
+    "questions": [
+        {{"id": "target", "question": "ターゲット層は誰ですか？", "options": ["10-20代", "30-40代", "50代以上", "全年齢"]}},
+        {{"id": "budget", "question": "予算規模は？", "options": ["〜10万円", "10-50万円", "50-100万円", "100万円以上", "未定"]}},
+        ...
+    ],
+    "reason": "追加質問が必要な理由（または不要な理由）"
+}}
+
+追加質問のルール：
+- テーマが具体的で十分な情報がある場合は needs_clarification: false
+- 漠然としたテーマの場合は needs_clarification: true
+- 質問は最大4つまで
+- 各質問には3-5個の選択肢を用意
+- 選択肢の最後に「その他」は不要（自由入力欄は別途用意される）
+
+よくある質問の例：
+- ターゲット層（年齢、職業、属性など）
+- 予算規模
+- 実施時期・期限
+- 制約条件（技術的、法的、リソースなど）
+- 目的・ゴール
+- 既存の取り組み・競合状況
+"""
+
+    try:
+        response = call_llm(client, prompt)
+        json_start = response.find("{")
+        json_end = response.rfind("}") + 1
+        if json_start != -1 and json_end > json_start:
+            return json.loads(response[json_start:json_end])
+    except:
+        pass
+    return {"needs_clarification": False, "questions": [], "reason": "分析できませんでした"}
+
+
+def generate_ideas_with_context(client, theme: str, framework: str, additional_info: dict, num_ideas: int = 5) -> str:
+    """追加情報を含めてアイデアを生成"""
     framework_info = FRAMEWORKS[framework]
+
+    # 追加情報をテキスト化
+    context_text = ""
+    if additional_info:
+        context_lines = []
+        for key, value in additional_info.items():
+            if value:
+                context_lines.append(f"- {key}: {value}")
+        if context_lines:
+            context_text = "\n追加情報:\n" + "\n".join(context_lines)
 
     if framework == "自由発想":
         prompt = f"""
 あなたはアイデアソンのファシリテーターです。
-以下のテーマについて、創造的で実用的なアイデアを{num_ideas}個生成してください。
+以下のテーマと追加情報に基づいて、創造的で実用的なアイデアを{num_ideas}個生成してください。
 
 テーマ: {theme}
+{context_text}
 
 各アイデアは以下の形式で出力してください：
 1. [アイデアのタイトル]: [具体的な説明（50-100字程度）]
 
-多様な視点から、実現可能かつ斬新なアイデアを出してください。
+追加情報を十分に考慮し、ターゲットや制約に合った、実現可能かつ斬新なアイデアを出してください。
 """
     else:
         viewpoints = "\n".join([f"- {name}: {desc}" for name, desc in framework_info["prompts"]])
@@ -146,6 +210,7 @@ def generate_ideas(client, theme: str, framework: str, num_ideas: int = 5) -> st
 「{framework}」フレームワークを使って、以下のテーマについてアイデアを生成してください。
 
 テーマ: {theme}
+{context_text}
 
 フレームワークの視点:
 {viewpoints}
@@ -154,19 +219,29 @@ def generate_ideas(client, theme: str, framework: str, num_ideas: int = 5) -> st
 形式:
 【視点名】[アイデアのタイトル]: [具体的な説明（50-100字程度）]
 
-実現可能かつ創造的なアイデアを出してください。
+追加情報を十分に考慮し、ターゲットや制約に合った、実現可能かつ創造的なアイデアを出してください。
 """
 
     return call_llm(client, prompt)
 
 
-def deepen_idea(client, idea: str, theme: str) -> str:
+def deepen_idea(client, idea: str, theme: str, additional_info: dict = None) -> str:
     """アイデアを深掘り"""
+    context_text = ""
+    if additional_info:
+        context_lines = []
+        for key, value in additional_info.items():
+            if value:
+                context_lines.append(f"- {key}: {value}")
+        if context_lines:
+            context_text = "\n追加情報:\n" + "\n".join(context_lines)
+
     prompt = f"""
 以下のアイデアを深掘りして、より具体的な企画案に発展させてください。
 
 テーマ: {theme}
 アイデア: {idea}
+{context_text}
 
 以下の観点で詳細化してください：
 1. 具体的な実施内容（3-5ステップ）
@@ -236,13 +311,21 @@ if "deepened" not in st.session_state:
     st.session_state.deepened = {}
 if "combined" not in st.session_state:
     st.session_state.combined = []
+if "clarification_questions" not in st.session_state:
+    st.session_state.clarification_questions = None
+if "additional_info" not in st.session_state:
+    st.session_state.additional_info = {}
+if "waiting_for_answers" not in st.session_state:
+    st.session_state.waiting_for_answers = False
+if "skip_questions" not in st.session_state:
+    st.session_state.skip_questions = False
 
 # API初期化
 client = init_groq()
 
 # サイドバー
 with st.sidebar:
-    st.markdown("### 💡 アイデアソン・アシスタント")
+    st.markdown("### ⚡ BrainSpark")
     st.markdown("---")
 
     # フレームワーク選択
@@ -255,6 +338,14 @@ with st.sidebar:
     st.caption(FRAMEWORKS[selected_framework]["description"])
 
     st.markdown("---")
+
+    # 追加情報表示
+    if st.session_state.additional_info:
+        st.markdown("#### 📋 設定済み情報")
+        for key, value in st.session_state.additional_info.items():
+            if value:
+                st.caption(f"• {key}: {value}")
+        st.markdown("---")
 
     # 統計表示
     if st.session_state.ideas:
@@ -279,6 +370,7 @@ with st.sidebar:
         st.markdown("#### 💾 エクスポート")
         export_data = {
             "テーマ": st.session_state.theme,
+            "追加情報": st.session_state.additional_info,
             "生成日時": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "アイデア": st.session_state.ideas,
             "評価": st.session_state.evaluations,
@@ -292,7 +384,13 @@ with st.sidebar:
         )
 
         # テキスト形式
-        text_export = f"テーマ: {st.session_state.theme}\n生成日時: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+        text_export = f"テーマ: {st.session_state.theme}\n"
+        if st.session_state.additional_info:
+            text_export += "追加情報:\n"
+            for key, value in st.session_state.additional_info.items():
+                if value:
+                    text_export += f"  - {key}: {value}\n"
+        text_export += f"生成日時: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
         text_export += "【アイデア一覧】\n"
         for i, idea in enumerate(st.session_state.ideas, 1):
             text_export += f"{i}. {idea}\n"
@@ -316,11 +414,15 @@ with st.sidebar:
         st.session_state.theme = ""
         st.session_state.deepened = {}
         st.session_state.combined = []
+        st.session_state.clarification_questions = None
+        st.session_state.additional_info = {}
+        st.session_state.waiting_for_answers = False
+        st.session_state.skip_questions = False
         st.rerun()
 
 # メインコンテンツ
-st.markdown('<p class="main-header">💡 アイデアソン・アシスタント</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-header">AIと一緒にブレインストーミング。フレームワークを活用して効率的にアイデアを発想・評価</p>', unsafe_allow_html=True)
+st.markdown('<p class="main-header">⚡ BrainSpark</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-header">AIと一緒にブレインストーミング。最高精度のアイデアを生み出すために、必要な情報をヒアリングします</p>', unsafe_allow_html=True)
 
 if not client:
     st.warning("Groq APIキーを設定してください（.streamlit/secrets.toml）")
@@ -336,28 +438,111 @@ with col1:
     )
 with col2:
     st.markdown("<br>", unsafe_allow_html=True)
-    generate_btn = st.button("✨ アイデアを生成", type="primary", use_container_width=True)
+    analyze_btn = st.button("✨ アイデアを生成", type="primary", use_container_width=True)
 
-if generate_btn and theme:
+# テーマ分析と追加質問
+if analyze_btn and theme:
     st.session_state.theme = theme
-    with st.spinner(f"「{selected_framework}」でアイデアを生成中..."):
-        result = generate_ideas(client, theme, selected_framework)
+    st.session_state.skip_questions = False
 
-        # 結果をパース（シンプルに行ごとに分割）
-        lines = [line.strip() for line in result.split("\n") if line.strip()]
-        new_ideas = []
-        for line in lines:
-            if any(c.isalnum() for c in line) and len(line) > 10:
-                # 番号や記号を除去
-                clean = line.lstrip("0123456789.-）)】・ ")
-                if clean and clean not in st.session_state.ideas:
-                    new_ideas.append(clean)
+    with st.spinner("テーマを分析中..."):
+        analysis = analyze_theme_and_ask_questions(client, theme)
 
-        st.session_state.ideas.extend(new_ideas[:10])  # 最大10個追加
-        st.rerun()
+        if analysis.get("needs_clarification") and analysis.get("questions"):
+            st.session_state.clarification_questions = analysis
+            st.session_state.waiting_for_answers = True
+        else:
+            # 追加質問不要 → 直接アイデア生成
+            st.session_state.waiting_for_answers = False
+            st.session_state.clarification_questions = None
+
+            with st.spinner(f"「{selected_framework}」でアイデアを生成中..."):
+                result = generate_ideas_with_context(client, theme, selected_framework, st.session_state.additional_info)
+
+                lines = [line.strip() for line in result.split("\n") if line.strip()]
+                new_ideas = []
+                for line in lines:
+                    if any(c.isalnum() for c in line) and len(line) > 10:
+                        clean = line.lstrip("0123456789.-）)】・ ")
+                        if clean and clean not in st.session_state.ideas:
+                            new_ideas.append(clean)
+
+                st.session_state.ideas.extend(new_ideas[:10])
+    st.rerun()
+
+# 追加質問の表示と回答収集
+if st.session_state.waiting_for_answers and st.session_state.clarification_questions:
+    questions = st.session_state.clarification_questions.get("questions", [])
+    reason = st.session_state.clarification_questions.get("reason", "")
+
+    st.markdown('<div class="question-box">', unsafe_allow_html=True)
+    st.markdown("### 💬 より良いアイデアを出すために教えてください")
+    if reason:
+        st.caption(reason)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    answers = {}
+    for q in questions:
+        q_id = q.get("id", q.get("question", ""))
+        question_text = q.get("question", "")
+        options = q.get("options", [])
+
+        if options:
+            selected = st.selectbox(
+                question_text,
+                ["選択してください"] + options + ["その他（自由入力）"],
+                key=f"q_{q_id}"
+            )
+
+            if selected == "その他（自由入力）":
+                custom_answer = st.text_input(f"{question_text}（自由入力）", key=f"custom_{q_id}")
+                answers[question_text] = custom_answer
+            elif selected != "選択してください":
+                answers[question_text] = selected
+        else:
+            answers[question_text] = st.text_input(question_text, key=f"q_{q_id}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("📝 この情報でアイデアを生成", type="primary", use_container_width=True):
+            st.session_state.additional_info = answers
+            st.session_state.waiting_for_answers = False
+
+            with st.spinner(f"「{selected_framework}」でアイデアを生成中..."):
+                result = generate_ideas_with_context(client, st.session_state.theme, selected_framework, answers)
+
+                lines = [line.strip() for line in result.split("\n") if line.strip()]
+                new_ideas = []
+                for line in lines:
+                    if any(c.isalnum() for c in line) and len(line) > 10:
+                        clean = line.lstrip("0123456789.-）)】・ ")
+                        if clean and clean not in st.session_state.ideas:
+                            new_ideas.append(clean)
+
+                st.session_state.ideas.extend(new_ideas[:10])
+            st.rerun()
+
+    with col2:
+        if st.button("⏭️ スキップして生成", use_container_width=True):
+            st.session_state.waiting_for_answers = False
+            st.session_state.skip_questions = True
+
+            with st.spinner(f"「{selected_framework}」でアイデアを生成中..."):
+                result = generate_ideas_with_context(client, st.session_state.theme, selected_framework, {})
+
+                lines = [line.strip() for line in result.split("\n") if line.strip()]
+                new_ideas = []
+                for line in lines:
+                    if any(c.isalnum() for c in line) and len(line) > 10:
+                        clean = line.lstrip("0123456789.-）)】・ ")
+                        if clean and clean not in st.session_state.ideas:
+                            new_ideas.append(clean)
+
+                st.session_state.ideas.extend(new_ideas[:10])
+            st.rerun()
 
 # タブ表示
-if st.session_state.ideas:
+if st.session_state.ideas and not st.session_state.waiting_for_answers:
     tab1, tab2, tab3 = st.tabs(["📝 アイデア一覧", "⭐ 評価", "🔀 組み合わせ"])
 
     with tab1:
@@ -368,7 +553,6 @@ if st.session_state.ideas:
                 col1, col2, col3 = st.columns([6, 1, 1])
 
                 with col1:
-                    # 評価済みならスコア表示
                     if idea in st.session_state.evaluations:
                         eval_data = st.session_state.evaluations[idea]
                         total = sum(v["score"] for v in eval_data.values())
@@ -380,7 +564,7 @@ if st.session_state.ideas:
                 with col2:
                     if st.button("深掘り", key=f"deep_{i}"):
                         with st.spinner("深掘り中..."):
-                            result = deepen_idea(client, idea, st.session_state.theme)
+                            result = deepen_idea(client, idea, st.session_state.theme, st.session_state.additional_info)
                             st.session_state.deepened[idea] = result
 
                 with col3:
@@ -390,7 +574,6 @@ if st.session_state.ideas:
                             del st.session_state.evaluations[idea]
                         st.rerun()
 
-                # 深掘り結果表示
                 if idea in st.session_state.deepened:
                     with st.expander("📖 深掘り結果", expanded=True):
                         st.markdown(st.session_state.deepened[idea])
@@ -401,7 +584,6 @@ if st.session_state.ideas:
         st.markdown("### アイデア評価")
         st.caption("各アイデアを4つの観点で評価します（AI自動評価 or 手動評価）")
 
-        # 一括AI評価
         if st.button("🤖 すべてAIで評価", type="secondary"):
             progress = st.progress(0)
             for i, idea in enumerate(st.session_state.ideas):
@@ -414,7 +596,6 @@ if st.session_state.ideas:
 
         st.markdown("---")
 
-        # 個別評価
         for i, idea in enumerate(st.session_state.ideas):
             with st.expander(f"💡 {idea[:50]}...", expanded=False):
 
@@ -448,7 +629,6 @@ if st.session_state.ideas:
                                 st.session_state.evaluations[idea] = result
                                 st.rerun()
 
-                    # 評価結果表示
                     if idea in st.session_state.evaluations:
                         eval_data = st.session_state.evaluations[idea]
                         total = 0
@@ -463,7 +643,6 @@ if st.session_state.ideas:
                         score_class = "score-high" if total >= 15 else "score-mid" if total >= 10 else "score-low"
                         st.markdown(f'**総合**: <span class="{score_class}">{total}/20点</span>', unsafe_allow_html=True)
 
-        # ランキング表示
         if st.session_state.evaluations:
             st.markdown("---")
             st.markdown("### 🏆 評価ランキング")
@@ -501,7 +680,6 @@ if st.session_state.ideas:
                         "result": result
                     })
 
-            # 組み合わせ結果表示
             for combo in st.session_state.combined:
                 with st.expander(f"🔀 {combo['idea1'][:20]}... × {combo['idea2'][:20]}..."):
                     st.markdown(combo["result"])
@@ -516,7 +694,7 @@ if st.session_state.ideas:
         else:
             st.info("組み合わせるには2つ以上のアイデアが必要です")
 
-else:
+elif not st.session_state.waiting_for_answers:
     # 初期表示
     st.markdown("---")
     st.markdown("### 🚀 使い方")
@@ -528,8 +706,8 @@ else:
         st.markdown("ブレインストーミングしたいテーマを入力します")
 
     with col2:
-        st.markdown("#### 2. フレームワークを選択")
-        st.markdown("SCAMPER、6W2Hなどの思考法を選びます")
+        st.markdown("#### 2. 質問に回答")
+        st.markdown("AIが追加情報を聞いてくるので、回答すると精度UP")
 
     with col3:
         st.markdown("#### 3. アイデアを評価")
