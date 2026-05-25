@@ -14,40 +14,39 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# カスタムCSS
+# カスタムCSS（ダークモード対応）
 st.markdown("""
 <style>
     .main-header {
         font-size: 2rem;
         font-weight: bold;
-        color: #1E3A5F;
         margin-bottom: 0.5rem;
     }
     .sub-header {
         font-size: 1rem;
-        color: #666;
+        opacity: 0.8;
         margin-bottom: 1.5rem;
     }
     .chat-user {
-        background: #e3f2fd;
+        background: rgba(33, 150, 243, 0.15);
         padding: 1rem;
         border-radius: 10px;
         margin: 0.5rem 0;
         border-left: 4px solid #2196f3;
     }
     .chat-assistant {
-        background: #f5f5f5;
+        background: rgba(76, 175, 80, 0.15);
         padding: 1rem;
         border-radius: 10px;
         margin: 0.5rem 0;
         border-left: 4px solid #4caf50;
     }
-    .usage-ok { color: #28a745; }
-    .usage-warning { color: #ffc107; }
-    .usage-danger { color: #dc3545; }
-    .score-high { color: #28a745; font-weight: bold; }
-    .score-mid { color: #ffc107; font-weight: bold; }
-    .score-low { color: #dc3545; font-weight: bold; }
+    .usage-ok { color: #4caf50; }
+    .usage-warning { color: #ff9800; }
+    .usage-danger { color: #f44336; }
+    .score-high { color: #4caf50; font-weight: bold; }
+    .score-mid { color: #ff9800; font-weight: bold; }
+    .score-low { color: #f44336; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
